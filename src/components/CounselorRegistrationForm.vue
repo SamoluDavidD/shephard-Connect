@@ -11,6 +11,7 @@ const props = defineProps<{
   busy: boolean
   error: string
   existingAccount?: boolean
+  supportCategories: Array<{ id: string; label: string }>
 }>()
 const emit = defineEmits<{
   submit: [payload: FormData, existingAccount: boolean]
@@ -22,6 +23,9 @@ const fields = reactive({
   fullLegalName: "",
   preferredDisplayName: "",
   specialization: "",
+  supportCategoryIds: [] as string[],
+  ageRange: "",
+  gender: "",
   codeOfConductAccepted: false,
   confidentialityAccepted: false,
   safeguardingAccepted: false,
@@ -30,6 +34,7 @@ const showPassword = ref(false)
 const profilePicture = ref<File | null>(null)
 const profilePicturePreview = ref<string | null>(null)
 const pictureError = ref("")
+const categoryError = ref("")
 
 function selectProfilePicture(event: Event) {
   const input = event.currentTarget
@@ -61,6 +66,11 @@ onBeforeUnmount(() => {
 function submit(event: Event) {
   const form = event.currentTarget
   if (!(form instanceof HTMLFormElement) || !form.reportValidity()) return
+  if (!fields.supportCategoryIds.length) {
+    categoryError.value = "Select at least one support category."
+    return
+  }
+  categoryError.value = ""
   const payload = new FormData()
   payload.set(
     "application",
@@ -70,6 +80,7 @@ function submit(event: Event) {
             fullLegalName: fields.fullLegalName,
             preferredDisplayName: fields.preferredDisplayName || null,
             specialization: fields.specialization,
+            supportCategoryIds: fields.supportCategoryIds,
             codeOfConductAccepted: fields.codeOfConductAccepted,
             confidentialityAccepted: fields.confidentialityAccepted,
             safeguardingAccepted: fields.safeguardingAccepted,
@@ -77,6 +88,8 @@ function submit(event: Event) {
         : {
             ...fields,
             preferredDisplayName: fields.preferredDisplayName || null,
+            ageRange: fields.ageRange || null,
+            gender: fields.gender || null,
           }),
     }),
   )
@@ -107,6 +120,37 @@ function submit(event: Event) {
       <Field label="Counseling specialization or area of interest">
         <input v-model="fields.specialization" class="control" required maxlength="160" />
       </Field>
+      <fieldset class="category-checkbox-field">
+        <legend>Approved support categories you are qualified to provide</legend>
+        <p class="field-hint">Your selected specialties will be reviewed with your counselor application.</p>
+        <label v-for="category in props.supportCategories" :key="category.id" class="check-label">
+          <input v-model="fields.supportCategoryIds" type="checkbox" :value="category.id" />
+          <span>{{ category.label }}</span>
+        </label>
+        <p v-if="categoryError" class="form-error" role="alert">{{ categoryError }}</p>
+        <p v-if="!props.supportCategories.length" class="field-hint">Support categories could not be loaded yet. Please try again shortly.</p>
+      </fieldset>
+      <template v-if="!props.existingAccount">
+        <Field label="Age range — optional" hint="Private information; not shown on your counselor profile.">
+          <select v-model="fields.ageRange" class="control">
+            <option value="">Prefer not to provide</option>
+            <option value="under_18">Under 18</option>
+            <option value="18_24">18–24</option>
+            <option value="25_34">25–34</option>
+            <option value="35_44">35–44</option>
+            <option value="45_54">45–54</option>
+            <option value="55_plus">55 and above</option>
+            <option value="prefer_not_to_say">Prefer not to say</option>
+          </select>
+        </Field>
+        <Field label="Gender — optional" hint="Private information; not shown on your counselor profile.">
+          <select v-model="fields.gender" class="control">
+            <option value="" disabled>Select gender</option>
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+          </select>
+        </Field>
+      </template>
       <Field v-if="!props.existingAccount" label="Profile picture — optional" hint="JPEG, PNG, or WebP; up to 5 MB. You can change or remove it later.">
         <div class="profile-picture-field">
           <ProfileAvatar

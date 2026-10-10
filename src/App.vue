@@ -10,6 +10,8 @@ import Badge from "./components/Badge.vue"
 import BaseButton from "./components/BaseButton.vue"
 import Brand from "./components/Brand.vue"
 import CounselorRegistrationForm from "./components/CounselorRegistrationForm.vue"
+import AdminAnalytics from "./components/AdminAnalytics.vue"
+import CounselorDisciples from "./components/CounselorDisciples.vue"
 import Field from "./components/Field.vue"
 import Icon from "./components/Icon.vue"
 import Notice from "./components/Notice.vue"
@@ -24,6 +26,7 @@ type CounselorApplicationSummary = {
   preferredDisplayName: string
   professionalTitle: string | null
   specialization: string
+  supportCategories: string[]
   submittedAt: string
   publicId: string
   accountStatus: string
@@ -64,6 +67,7 @@ type CounselorApplicationDetail = CounselorApplicationSummary & {
   licenseExpiry: string | null
   biography: string | null
   areasOfExpertise: string[]
+  supportCategories: string[]
   languages: string[]
   workHistory: string | null
   referencesText: string | null
@@ -114,6 +118,8 @@ type LiveConversation = {
   updated_at: string
   other_party_public_id: string
   other_party_display_name: string
+  other_party_is_anonymous: boolean
+  other_party_picture_url: string | null
 }
 type LiveMessage = {
   id: string
@@ -146,16 +152,28 @@ type CounselorCard = {
   id: string
   publicId: string
   name: string
-  initials: string
   title: string
   bio: string
   areas: string[]
+  specialtyIds: string[]
   language: string
-  color: string
+  pictureUrl: string | null
 }
+type SupportCategory = { id: string; label: string }
 const liveCounselors = ref<CounselorCard[]>([])
+const supportCategories = ref<SupportCategory[]>([])
 const counselorLoadError = ref("")
+const counselorLoading = ref(false)
 const displayedCounselors = computed<CounselorCard[]>(() => liveCounselors.value)
+const selectedSupportCategory = computed(() =>
+  supportCategories.value.find((category) => category.id === state.preferredCategoryId) || null,
+)
+const selectedCounselorSupportsCategory = computed(() =>
+  Boolean(
+    activeSupportCategoryId() &&
+      selectedCounselor.value?.specialtyIds.includes(activeSupportCategoryId() || ""),
+  ),
+)
 const languageOptions = computed(() => [
   ...new Set(displayedCounselors.value.flatMap((counselor) => counselor.language.split(", "))),
 ])
@@ -186,6 +204,8 @@ const registrationPicture = ref<File | null>(null)
 const registrationPicturePreview = ref<string | null>(null)
 const registrationPictureError = ref("")
 const registrationConsent = ref(false)
+const registrationAgeRange = ref("")
+const registrationGender = ref("")
 const publicId = ref("")
 const recoveryPublicId = ref("")
 const recoveryInput = ref("")
@@ -201,6 +221,8 @@ const profileStatus = ref("")
 const profileLoading = ref(false)
 const displayNameDraft = ref("")
 const profileBioDraft = ref("")
+const profileAgeRange = ref("")
+const profileGender = ref("")
 const selectedProfilePicture = ref<File | null>(null)
 const selectedProfilePicturePreview = ref<string | null>(null)
 const profilePictureError = ref("")
@@ -244,22 +266,42 @@ const counselorProfileDocuments = ref<CounselorProfileDocument[]>([])
 const counselorDocumentStatus = ref("")
 const counselorProfileApplicationRef = ref("")
 const chatError = ref("")
+const resourceDialogOpen = ref(false)
+const resourceTitle = ref("")
+const resourceUrl = ref("")
+const resourceNote = ref("")
+const resourceError = ref("")
+const resourceDraftConversationPublicId = ref("")
+const resourceDraftRecipient = ref("")
+const journeyLoading = ref(false)
+const journeySavingStage = ref<number | null>(null)
+const journeyError = ref("")
 const counselorCases = ref<Array<Record<string, string | null>>>([])
 const realConversations = ref<LiveConversation[]>([])
 const realMessages = ref<LiveMessage[]>([])
 let messageLoadSequence = 0
 let messagePollTimer: number | undefined
+let conversationSummaryPollTimer: number | undefined
 let messagePollInFlight = false
+let conversationSummaryPollInFlight = false
 let followLatestMessages = true
 const messageSending = ref(false)
 const editingMessageId = ref("")
 const editDraft = ref("")
 const messageActionError = ref("")
 const realJourney = ref<Record<string, string>>({})
+const journeyCompletedCount = computed(
+  () => journeyStages.filter((stage) => realJourney.value[stage.name] === "completed").length,
+)
+const journeyProgressPercent = computed(() =>
+  Math.round((journeyCompletedCount.value / journeyStages.length) * 100),
+)
 const currentConversation = ref<{
   publicId: string
   otherPartyPublicId: string
   otherPartyName: string | null
+  otherPartyIsAnonymous: boolean
+  otherPartyPictureUrl: string | null
   status: string
 } | null>(null)
 const conversationMessages = computed(() =>
@@ -289,13 +331,14 @@ const realAdminUsers = ref<Array<{
   accountType: string
   role: string
   status: string
+  anonymized: boolean
   displayName: string | null
   createdAt: string
   approved?: boolean
   areas?: string[]
+  approvedCategoryIds?: string[]
   safeguardingReview?: boolean
 }>>([])
-const liveReportSummary = ref<Record<string, { value: number | null; suppressed: boolean }>>({})
 const accountBusy = ref(false)
 const counselorApplication = ref<ApplicantApplication | null>(null)
 const counselorApplicationLoading = ref(false)
@@ -322,6 +365,13 @@ const reportLoading = ref(false)
 
 const adminTab = ref("Counselors")
 const adminSearch = ref("")
+const pendingUserAnonymization = ref<(typeof realAdminUsers.value)[number] | null>(null)
+const anonymizationError = ref("")
+const anonymizationLoading = ref(false)
+const specialtyEditor = ref<(typeof realAdminUsers.value)[number] | null>(null)
+const specialtyEditorIds = ref<string[]>([])
+const specialtyEditorError = ref("")
+const specialtyEditorSaving = ref(false)
 
 const dashboardTitle = computed(() =>
   account.user?.displayName
@@ -332,10 +382,8 @@ const dashboardTitle = computed(() =>
 )
 const currentJourneyStage = computed(() => {
   const stagesForUser = journeyStages.map((stage) => realJourney.value[stage.name])
-  const active = stagesForUser.lastIndexOf("in_progress")
-  if (active >= 0) return active
-  const completed = stagesForUser.lastIndexOf("completed")
-  return completed >= 0 ? Math.min(completed + 1, journeyStages.length - 1) : null
+  const next = stagesForUser.findIndex((status) => status !== "completed")
+  return next >= 0 ? next : null
 })
 
 const adminSearchResults = computed(() =>
@@ -383,6 +431,31 @@ function go(path: string) {
   void router.push(path)
 }
 
+function chooseSupportCategory(categoryId: string) {
+  state.preferredCategoryId = categoryId
+  state.browseAllCounselors = false
+  if (route.name === "counselors") void loadCounselors()
+}
+
+function browseAllCounselors() {
+  state.browseAllCounselors = true
+  if (route.name === "counselors") void loadCounselors()
+  else void router.push("/counselors")
+}
+
+function activeSupportCategoryId() {
+  if (state.need === "Other") return state.preferredCategoryId
+  return needs.find((item) => item.title === state.need)?.id || null
+}
+
+function counselorFlowUrl(path: string) {
+  const query = new URLSearchParams({ need: state.need })
+  const categoryId = activeSupportCategoryId()
+  if (categoryId) query.set("categoryId", categoryId)
+  if (state.browseAllCounselors) query.set("all", "true")
+  return `${path}?${query.toString()}`
+}
+
 function counselorProfileDocumentUrl(document: CounselorProfileDocument) {
   return apiUrl(
     `/counselor/applications/${encodeURIComponent(counselorProfileApplicationRef.value)}/documents/${encodeURIComponent(document.id)}`,
@@ -398,32 +471,51 @@ function homeFor(user: AccountUser | null = account.user) {
 
 async function loadCounselors() {
   counselorLoadError.value = ""
+  counselorLoading.value = true
   try {
+    if (!supportCategories.value.length) {
+      const categoryResult = await api<{ categories: SupportCategory[] }>("/support-categories")
+      supportCategories.value = categoryResult.categories
+    }
+    const categoryId = state.need === "Other"
+      ? state.preferredCategoryId
+      : needs.find((item) => item.title === state.need)?.id || null
+    if (!categoryId && !state.browseAllCounselors) {
+      liveCounselors.value = []
+      return
+    }
+    const query = state.browseAllCounselors
+      ? "?all=true"
+      : `?categoryId=${encodeURIComponent(categoryId || "")}`
     const result = await api<{ counselors: Array<{
       publicId: string
       displayName: string | null
       headline: string
       bio: string
       areas: string[]
+      specialtyIds: string[]
       languages: string[]
-    }> }>("/counselors")
-    liveCounselors.value = result.counselors.map((item, index) => {
+      pictureUrl: string | null
+    }> }>(`/counselors/matches${query}`)
+    liveCounselors.value = result.counselors.map((item) => {
       const name = item.displayName || item.publicId
       return {
         id: item.publicId,
         publicId: item.publicId,
         name,
-        initials: counselorInitials(name),
         title: item.headline,
         bio: item.bio,
         areas: item.areas,
+        specialtyIds: item.specialtyIds,
         language: item.languages.join(", "),
-        color: ["mint", "gold", "blue"][index % 3],
+        pictureUrl: item.pictureUrl,
       }
     })
   } catch (error) {
     counselorLoadError.value =
-      error instanceof Error ? error.message : "Approved counselor profiles could not be loaded."
+      error instanceof Error ? error.message : "Matching counselor profiles could not be loaded."
+  } finally {
+    counselorLoading.value = false
   }
 }
 
@@ -434,6 +526,37 @@ async function loadAdminUsers(role?: string) {
     `/admin/users${query.size ? `?${query.toString()}` : ""}`,
   )
   realAdminUsers.value = result.users
+}
+
+function openSpecialtyEditor(user: (typeof realAdminUsers.value)[number]) {
+  specialtyEditor.value = user
+  specialtyEditorIds.value = [...(user.approvedCategoryIds || [])]
+  specialtyEditorError.value = ""
+}
+
+async function saveCounselorSpecialties() {
+  if (!specialtyEditor.value) return
+  specialtyEditorSaving.value = true
+  specialtyEditorError.value = ""
+  try {
+    const result = await api<{ approvedCategoryIds: string[] }>(
+      `/admin/users/${encodeURIComponent(specialtyEditor.value.publicId)}/specialties`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ categoryIds: specialtyEditorIds.value }),
+      },
+    )
+    const target = realAdminUsers.value.find(
+      (user) => user.publicId === specialtyEditor.value?.publicId,
+    )
+    if (target) target.approvedCategoryIds = result.approvedCategoryIds
+    specialtyEditor.value = null
+  } catch (error) {
+    specialtyEditorError.value =
+      error instanceof Error ? error.message : "Counselor categories could not be saved."
+  } finally {
+    specialtyEditorSaving.value = false
+  }
 }
 
 async function loadAdminApplications() {
@@ -624,19 +747,6 @@ async function toggleApplicantSuspension() {
   }
 }
 
-async function loadReportSummary() {
-  const result = await api<{
-    summary: Record<string, { value: number | null; suppressed: boolean }>
-  }>("/admin/summary")
-  liveReportSummary.value = result.summary
-}
-
-function reportValue(key: string) {
-  const item = liveReportSummary.value[key]
-  if (!item) return "Loading"
-  return item.suppressed ? "Suppressed (<5)" : String(item.value)
-}
-
 async function loadAccountData() {
   const user = account.user
   if (!user) return
@@ -662,7 +772,8 @@ async function loadAccountData() {
           reference: latest.public_ref,
           counselor: latest.counselor_name || latest.counselor_public_id,
           topic: latest.topic,
-          need: latest.need,
+          need: latest.support_category_label || latest.need,
+          supportCategoryId: latest.support_category_id || null,
           description: latest.description,
           status: latest.status as RequestStatus,
           createdAt: latest.created_at,
@@ -678,16 +789,13 @@ async function loadAccountData() {
           publicId: conversation.public_id,
           otherPartyPublicId: conversation.other_party_public_id,
           otherPartyName: conversation.other_party_display_name,
+          otherPartyIsAnonymous: conversation.other_party_is_anonymous,
+          otherPartyPictureUrl: conversation.other_party_picture_url,
           status: conversation.status,
         }
       : null
     if (!conversation) realMessages.value = []
-    realJourney.value = Object.fromEntries(
-      journeyResult.progress.map((item) => [item.stage, item.status]),
-    )
-    const activeStage = journeyStages
-      .map((stage) => realJourney.value[stage.name])
-      .lastIndexOf("in_progress")
+    applyJourneyProgress(journeyResult.progress)
   } else if (user.role === "counselor") {
     const [caseResult, conversationResult, profileResult] = await Promise.all([
       api<{ cases: Array<Record<string, string | null>> }>("/counselor/cases"),
@@ -742,6 +850,8 @@ async function loadAccountData() {
           publicId: conversation.public_id,
           otherPartyPublicId: conversation.other_party_public_id,
           otherPartyName: conversation.other_party_display_name,
+          otherPartyIsAnonymous: conversation.other_party_is_anonymous,
+          otherPartyPictureUrl: conversation.other_party_picture_url,
           status: conversation.status,
         }
       : null
@@ -752,7 +862,8 @@ async function loadAccountData() {
           reference: String(latest.public_ref),
           counselor: String(latest.seeker_public_id),
           topic: String(latest.topic),
-          need: String(latest.need),
+          need: String(latest.support_category_label || latest.need),
+          supportCategoryId: String(latest.support_category_id || "") || null,
           description: String(latest.description || ""),
           status: String(latest.status) as RequestStatus,
           createdAt: String(latest.created_at),
@@ -769,9 +880,6 @@ async function loadAccountData() {
   }
   if (user.role === "superadmin" && route.name === "admin") {
     await loadAdminUsers(adminTab.value === "Counselors" ? "counselor" : undefined)
-  }
-  if (user.role === "superadmin" && route.name === "reports") {
-    await loadReportSummary()
   }
 }
 
@@ -801,8 +909,46 @@ async function updateAdminStatus(user: (typeof realAdminUsers.value)[number], st
       body: JSON.stringify({ status }),
     })
     user.status = status
+    account.error = ""
   } catch (error) {
     account.error = error instanceof Error ? error.message : "Account status could not be updated."
+  }
+}
+
+function requestUserAnonymization(user: (typeof realAdminUsers.value)[number]) {
+  pendingUserAnonymization.value = user
+  anonymizationError.value = ""
+}
+
+async function confirmUserAnonymization() {
+  const user = pendingUserAnonymization.value
+  if (!user || anonymizationLoading.value) return
+  anonymizationLoading.value = true
+  anonymizationError.value = ""
+  account.error = ""
+  try {
+    const result = await api<{ warning?: string }>(
+      `/admin/users/${encodeURIComponent(user.publicId)}`,
+      { method: "DELETE" },
+    )
+    user.status = "deactivated"
+    user.anonymized = true
+    user.displayName = null
+    user.safeguardingReview = false
+    if (result.warning) account.error = result.warning
+    pendingUserAnonymization.value = null
+  } catch (error) {
+    anonymizationError.value =
+      error instanceof Error ? error.message : "The account could not be anonymized."
+  } finally {
+    anonymizationLoading.value = false
+  }
+}
+
+function cancelUserAnonymization() {
+  if (!anonymizationLoading.value) {
+    pendingUserAnonymization.value = null
+    anonymizationError.value = ""
   }
 }
 
@@ -813,6 +959,7 @@ async function updateAdminRole(user: (typeof realAdminUsers.value)[number], role
       body: JSON.stringify({ role }),
     })
     user.role = role
+    account.error = ""
     if (adminTab.value === "Counselors" && role !== "counselor") {
       realAdminUsers.value = realAdminUsers.value.filter((item) => item.publicId !== user.publicId)
     }
@@ -977,10 +1124,41 @@ async function saveDisplayName() {
   }
 }
 
+async function saveDemographics() {
+  if (!account.user || account.user.accountType === "anonymous") return
+  profileLoading.value = true
+  profileStatus.value = ""
+  try {
+    await api("/me", {
+      method: "PATCH",
+      body: JSON.stringify({
+        displayName: displayNameDraft.value.trim() || null,
+        ageRange: profileAgeRange.value || null,
+        gender: profileGender.value || null,
+      }),
+    })
+    profileStatus.value = "Private profile information updated."
+  } catch (error) {
+    profileStatus.value =
+      error instanceof Error ? error.message : "Private profile information could not be saved."
+  } finally {
+    profileLoading.value = false
+  }
+}
+
 async function loadUserProfile() {
   try {
-    const result = await api<{ profile: { bio: string; pictureUrl: string | null } }>("/me/profile")
+    const result = await api<{ profile: {
+      bio: string
+      ageRange: string | null
+      gender: string | null
+      pictureUrl: string | null
+    } }>("/me/profile")
     profileBioDraft.value = result.profile.bio
+    profileAgeRange.value = result.profile.ageRange || ""
+    profileGender.value = ["male", "female"].includes(result.profile.gender || "")
+      ? result.profile.gender || ""
+      : ""
     account.profilePictureUrl = result.profile.pictureUrl
   } catch (error) {
     profileStatus.value =
@@ -1047,6 +1225,7 @@ async function saveProfilePicture() {
       body: form,
     })
     account.profilePictureUrl = result.pictureUrl
+    await loadCounselors()
     if (selectedProfilePicturePreview.value) URL.revokeObjectURL(selectedProfilePicturePreview.value)
     selectedProfilePicture.value = null
     selectedProfilePicturePreview.value = null
@@ -1066,6 +1245,7 @@ async function removeProfilePicture() {
   try {
     await api<void>("/me/profile/picture", { method: "DELETE" })
     account.profilePictureUrl = null
+    await loadCounselors()
     if (selectedProfilePicturePreview.value) URL.revokeObjectURL(selectedProfilePicturePreview.value)
     selectedProfilePicture.value = null
     selectedProfilePicturePreview.value = null
@@ -1201,16 +1381,74 @@ function journeyStageCompleted(index: number) {
   return realJourney.value[journeyStages[index].name] === "completed"
 }
 
-async function updateJourneyStage(index: number) {
-  const stage = journeyStages[index].name
+function applyJourneyProgress(progress: Array<{ stage: string; status: string }>) {
+  const storedStatuses = new Map(progress.map((item) => [item.stage, item.status]))
+  const statuses: Record<string, string> = {}
+  let canAdvance = true
+  for (const stage of journeyStages) {
+    const storedStatus = storedStatuses.get(stage.name)
+    if (!canAdvance || storedStatus !== "completed") {
+      statuses[stage.name] =
+        canAdvance && storedStatus === "in_progress" ? "in_progress" : "not_started"
+      canAdvance = false
+    } else {
+      statuses[stage.name] = "completed"
+    }
+  }
+  realJourney.value = statuses
+}
+
+async function loadJourneyProgress() {
+  if (!account.user || !["anonymous", "registered"].includes(account.user.role)) return
+  journeyLoading.value = true
+  journeyError.value = ""
   try {
-    await api(`/journey/${encodeURIComponent(stage)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: "in_progress" }),
-    })
-    realJourney.value[stage] = "in_progress"
+    const result = await api<{ progress: Array<{ stage: string; status: string }> }>("/journey")
+    applyJourneyProgress(result.progress)
   } catch (error) {
-    profileStatus.value = error instanceof Error ? error.message : "Journey progress could not be saved."
+    journeyError.value =
+      error instanceof Error ? error.message : "Your journey progress could not be loaded."
+  } finally {
+    journeyLoading.value = false
+  }
+}
+
+async function updateJourneyStage(
+  index: number,
+  status: "in_progress" | "completed" | "not_started" = "in_progress",
+) {
+  if (index !== currentJourneyStage.value) {
+    journeyError.value = "Complete journey stages in order, starting with the next available stage."
+    return
+  }
+  if (
+    status === "completed" &&
+    realJourney.value[journeyStages[index].name] !== "in_progress"
+  ) {
+    journeyError.value = "Start this stage before marking it complete."
+    return
+  }
+  const stage = journeyStages[index].name
+  journeySavingStage.value = index
+  journeyError.value = ""
+  try {
+    const result = await api<{ progress: { stage: string; status: string } }>(
+      `/journey/${encodeURIComponent(stage)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      },
+    )
+    realJourney.value[stage] = result.progress.status
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Journey progress could not be saved."
+    if (message.includes("Complete the journey stages in order")) {
+      await loadJourneyProgress()
+    }
+    journeyError.value = message
+  } finally {
+    journeySavingStage.value = null
   }
 }
 
@@ -1237,6 +1475,24 @@ async function loadMessages(conversationPublicId: string) {
   }
 }
 
+async function loadConversationSummaries() {
+  const result = await api<{ conversations: LiveConversation[] }>("/conversations")
+  realConversations.value = result.conversations
+  const current = result.conversations.find(
+    (conversation) => conversation.public_id === currentConversation.value?.publicId,
+  )
+  if (current) {
+    currentConversation.value = {
+      publicId: current.public_id,
+      otherPartyPublicId: current.other_party_public_id,
+      otherPartyName: current.other_party_display_name,
+      otherPartyIsAnonymous: current.other_party_is_anonymous,
+      otherPartyPictureUrl: current.other_party_picture_url,
+      status: current.status,
+    }
+  }
+}
+
 async function selectConversation(publicId: string) {
   const conversation = realConversations.value.find((item) => item.public_id === publicId)
   if (!conversation) return
@@ -1244,6 +1500,8 @@ async function selectConversation(publicId: string) {
     publicId: conversation.public_id,
     otherPartyPublicId: conversation.other_party_public_id,
     otherPartyName: conversation.other_party_display_name,
+    otherPartyIsAnonymous: conversation.other_party_is_anonymous,
+    otherPartyPictureUrl: conversation.other_party_picture_url,
     status: conversation.status,
   }
   realMessages.value = []
@@ -1338,6 +1596,7 @@ onMounted(async () => {
     ) return
     messagePollInFlight = true
     try {
+      await loadConversationSummaries()
       await loadMessages(currentConversation.value.publicId)
     } catch (error) {
       chatError.value =
@@ -1346,10 +1605,36 @@ onMounted(async () => {
       messagePollInFlight = false
     }
   }, 5000)
+  conversationSummaryPollTimer = window.setInterval(async () => {
+    if (
+      conversationSummaryPollInFlight ||
+      route.name !== "counselor" ||
+      document.visibilityState !== "visible" ||
+      !account.user
+    ) return
+    conversationSummaryPollInFlight = true
+    try {
+      await loadConversationSummaries()
+    } catch (error) {
+      account.error = error instanceof Error
+        ? error.message
+        : "Conversation profile details could not be refreshed."
+    } finally {
+      conversationSummaryPollInFlight = false
+    }
+  }, 15000)
   void loadHomepageSettings().catch((error) => {
     homepageSettingsError.value =
       error instanceof Error ? error.message : "Homepage settings could not be loaded."
   })
+  const queryNeed = typeof route.query.need === "string" ? route.query.need : null
+  if (queryNeed && needs.some((item) => item.title === queryNeed)) {
+    state.need = queryNeed
+  }
+  const queryCategoryId =
+    typeof route.query.categoryId === "string" ? route.query.categoryId : null
+  if (queryCategoryId) state.preferredCategoryId = queryCategoryId
+  state.browseAllCounselors = route.query.all === "true"
   void loadCounselors()
   try {
     await refreshAccount()
@@ -1385,13 +1670,6 @@ watch(
     if (name === "counselor-application" && account.user.accountType === "counselor") {
       await loadCounselorApplication()
     }
-    if (name === "reports" && account.user.role === "superadmin") {
-      try {
-        await loadReportSummary()
-      } catch (error) {
-        account.error = error instanceof Error ? error.message : "Reports could not be loaded."
-      }
-    }
     if (name === "counseling") {
       try {
         await loadAccountData()
@@ -1399,11 +1677,15 @@ watch(
         chatError.value = error instanceof Error ? error.message : "Conversation could not be loaded."
       }
     }
+    if (name === "journey" || name === "seeker-dashboard") {
+      await loadJourneyProgress()
+    }
   },
 )
 
 onBeforeUnmount(() => {
   if (messagePollTimer !== undefined) window.clearInterval(messagePollTimer)
+  if (conversationSummaryPollTimer !== undefined) window.clearInterval(conversationSummaryPollTimer)
   if (homepageImagePreview.value) URL.revokeObjectURL(homepageImagePreview.value)
 })
 
@@ -1460,6 +1742,8 @@ watch(accountType, () => {
   password.value = ""
   publicId.value = ""
   registrationConsent.value = false
+  registrationAgeRange.value = ""
+  registrationGender.value = ""
   authStatus.value = ""
 })
 
@@ -1493,6 +1777,13 @@ async function submitRequest() {
     if (!counselor?.publicId) {
       throw new Error("Choose an approved counselor with an active ShepherdConnect account.")
     }
+    const supportCategoryId = activeSupportCategoryId()
+    if (!supportCategoryId) {
+      throw new Error("Choose a support category before sending your counseling request.")
+    }
+    if (!counselor.specialtyIds.includes(supportCategoryId)) {
+      throw new Error("This counselor is not approved for the selected support category.")
+    }
     const result = await api<{ request: {
       public_ref: string
       status: RequestStatus
@@ -1502,6 +1793,7 @@ async function submitRequest() {
       body: JSON.stringify({
         counselorPublicId: counselor.publicId,
         need: state.need,
+        supportCategoryId,
         topic: topic.value.trim(),
         description: description.value.trim(),
       }),
@@ -1511,6 +1803,7 @@ async function submitRequest() {
       counselor: counselor.name,
       topic: topic.value.trim(),
       need: state.need,
+      supportCategoryId,
       description: description.value.trim(),
       status: result.request.status,
       createdAt: result.request.created_at,
@@ -1553,6 +1846,8 @@ async function submitAuth() {
         email: email.value,
         password: password.value,
         displayName: accountName.value,
+        ageRange: registrationAgeRange.value || null,
+        gender: registrationGender.value || null,
         consent: registrationConsent.value,
       }
       let body: BodyInit = JSON.stringify(registrationDetails)
@@ -1704,6 +1999,14 @@ async function submitMessage() {
     return
   }
   const conversationPublicId = currentConversation.value.publicId
+  if (
+    resourceDraftConversationPublicId.value &&
+    resourceDraftConversationPublicId.value !== conversationPublicId
+  ) {
+    chatError.value =
+      "This resource was prepared for a different conversation. Select that conversation or discard and prepare the resource again."
+    return
+  }
   messageSending.value = true
   try {
     await api(`/conversations/${encodeURIComponent(conversationPublicId)}/messages`, {
@@ -1711,6 +2014,8 @@ async function submitMessage() {
       body: JSON.stringify({ body: text }),
     })
     chatText.value = ""
+    resourceDraftConversationPublicId.value = ""
+    resourceDraftRecipient.value = ""
     chatError.value = ""
   } catch (error) {
     chatError.value = error instanceof Error ? error.message : "Message could not be sent."
@@ -1726,6 +2031,92 @@ async function submitMessage() {
         ? `Your message was sent, but history could not be refreshed: ${error.message}`
         : "Your message was sent, but history could not be refreshed."
   }
+}
+
+function messageSegments(body: string) {
+  return body.split(/(https:\/\/\S+)/g).map((text) => {
+    try {
+      const url = new URL(text)
+      return url.protocol === "https:"
+        ? { text, href: text }
+        : { text, href: null }
+    } catch {
+      return { text, href: null }
+    }
+  })
+}
+
+function openResourceDialog() {
+  if (account.user?.role !== "counselor") {
+    chatError.value = "Only the assigned counselor can prepare a resource for this conversation."
+    return
+  }
+  if (!currentConversation.value || currentConversation.value.status !== "open") {
+    chatError.value = "Select an open assigned conversation before adding a resource."
+    return
+  }
+  resourceTitle.value = ""
+  resourceUrl.value = ""
+  resourceNote.value = ""
+  resourceError.value = ""
+  resourceDialogOpen.value = true
+}
+
+function prepareResourceForSend() {
+  const conversation = currentConversation.value
+  const title = resourceTitle.value.trim()
+  const urlText = resourceUrl.value.trim()
+  const note = resourceNote.value.trim()
+  if (account.user?.role !== "counselor" || !conversation || conversation.status !== "open") {
+    resourceError.value = "Select an open assigned conversation before adding a resource."
+    return
+  }
+  if (!title || title.length > 160) {
+    resourceError.value = "Enter a resource title of 1–160 characters."
+    return
+  }
+  let url: URL
+  try {
+    url = new URL(urlText)
+  } catch {
+    resourceError.value = "Enter a valid HTTPS resource link."
+    return
+  }
+  if (url.protocol !== "https:" || url.username || url.password || urlText.length > 2048) {
+    resourceError.value = "Use a valid HTTPS resource link without embedded sign-in details."
+    return
+  }
+  if (chatText.value.trim()) {
+    resourceError.value = "Send or clear the current message before preparing a resource."
+    return
+  }
+
+  const draft = [`A resource for you:`, title, url.href, note].filter(Boolean).join("\n\n")
+  if (draft.length > 4000) {
+    resourceError.value = "Shorten the resource note so it fits in a message."
+    return
+  }
+  chatText.value = draft
+  resourceDraftConversationPublicId.value = conversation.publicId
+  resourceDraftRecipient.value =
+    conversation.otherPartyName || conversation.otherPartyPublicId
+  resourceDialogOpen.value = false
+  resourceError.value = ""
+  chatError.value = ""
+}
+
+function discardResourceDraft() {
+  if (resourceDraftConversationPublicId.value) chatText.value = ""
+  resourceDraftConversationPublicId.value = ""
+  resourceDraftRecipient.value = ""
+  chatError.value = ""
+}
+
+function updateJourneyPrimaryStage() {
+  const index = currentJourneyStage.value ?? 0
+  const stage = journeyStages[index].name
+  const status = realJourney.value[stage] === "in_progress" ? "completed" : "in_progress"
+  void updateJourneyStage(index, status)
 }
 
 async function submitReport() {
@@ -1759,13 +2150,6 @@ async function submitReport() {
 function leaveConversation() {
   sessionStorage.clear()
   void router.replace("/safe")
-}
-
-function counselorInitials(name: string) {
-  return name
-    .split(" ")
-    .map((part) => part[0])
-    .join("")
 }
 
 </script>
@@ -1872,9 +2256,27 @@ function counselorInitials(name: string) {
       <button class="back-link" @click="go('/privacy')"><Icon name="ArrowLeft" :size="17" /> Back</button>
       <div class="flow-heading compact"><span class="flow-icon"><Icon name="HeartHandshake" :size="24" /></span><h1>What would you like support with?</h1><p>Choose the area that best fits. You can explain more privately after selecting a counselor.</p></div>
       <div class="need-grid">
-        <button v-for="(item, index) in needs" :key="item.title" :class="state.need === item.title ? 'need-card selected' : 'need-card'" @click="setNeed(item.title)">
+        <button v-for="(item, index) in needs" :key="item.title" :class="state.need === item.title ? 'need-card selected' : 'need-card'" @click="setNeed(item.title, item.id === 'other' ? null : item.id)">
           <span><Icon :name="['Sparkles','Heart','BookOpen','GraduationCap','Sprout','MoreHorizontal'][index]" :size="22" /></span><div><strong>{{ item.title }}</strong><small>{{ item.note }}</small></div><i><Icon v-if="state.need === item.title" name="Check" :size="14" /></i>
         </button>
+      </div>
+      <div v-if="state.need === 'Other'" class="other-category-picker">
+        <Field label="Choose a preferred counselor category">
+          <select
+            class="control"
+            :value="state.preferredCategoryId || ''"
+            @change="chooseSupportCategory(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">Explore available categories</option>
+            <option v-for="category in supportCategories" :key="category.id" :value="category.id">
+              {{ category.label }}
+            </option>
+          </select>
+        </Field>
+        <p v-if="!supportCategories.length" class="field-hint">Available categories are loading.</p>
+        <BaseButton variant="secondary" @click="browseAllCounselors">
+          View all available counselors
+        </BaseButton>
       </div>
       <div class="flow-actions"><BaseButton variant="secondary" @click="go('/privacy')">Back</BaseButton><BaseButton @click="go('/counselors')">Find a counselor <Icon name="ArrowRight" /></BaseButton></div>
     </div>
@@ -1885,34 +2287,52 @@ function counselorInitials(name: string) {
     <div class="directory-shell">
       <button class="back-link" @click="go('/needs')"><Icon name="ArrowLeft" :size="17" /> Back</button>
       <div class="directory-heading"><div><h1>Find a counselor</h1><p>Every counselor shown here is approved by GCML.</p></div><Badge tone="success"><Icon name="ShieldCheck" :size="14" /> Verified profiles</Badge></div>
+      <div v-if="state.need === 'Other'" class="other-category-picker">
+        <Field label="Preferred category">
+          <select
+            class="control"
+            :value="state.preferredCategoryId || ''"
+            @change="chooseSupportCategory(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">Choose a category</option>
+            <option v-for="category in supportCategories" :key="category.id" :value="category.id">
+              {{ category.label }}
+            </option>
+          </select>
+        </Field>
+        <BaseButton variant="secondary" @click="browseAllCounselors">View all available counselors</BaseButton>
+      </div>
+      <p v-if="state.browseAllCounselors" class="field-hint">Browsing all active, approved counselors.</p>
+      <p v-else-if="selectedSupportCategory" class="field-hint">Matched for {{ selectedSupportCategory.label }}.</p>
       <div class="filters">
         <label class="search-control"><Icon name="Search" :size="18" /><input v-model="counselorSearch" placeholder="Search counselors or service areas" /></label>
         <select v-model="languageFilter" class="control"><option>All languages</option><option v-for="language in languageOptions" :key="language">{{ language }}</option></select>
       </div>
-      <p class="results-label">{{ filteredCounselors.length }} counselors available for <strong>{{ state.need }}</strong></p>
+      <p class="results-label">{{ filteredCounselors.length }} counselors available for <strong>{{ state.need === 'Other' ? selectedSupportCategory?.label || 'your selected category' : state.need }}</strong></p>
       <div class="counselor-grid">
         <article v-for="counselor in filteredCounselors" :key="counselor.id" class="counselor-card">
-          <div class="counselor-card-top"><span :class="`counselor-avatar avatar-${counselor.color}`">{{ counselor.initials }}</span><Badge tone="success"><span class="status-dot" /> GCML approved</Badge></div>
+          <div class="counselor-card-top"><ProfileAvatar :src="counselor.pictureUrl ? apiUrl(counselor.pictureUrl) : null" :name="counselor.name" size="medium" /><Badge tone="success"><span class="status-dot" /> GCML approved</Badge></div>
           <h2>{{ counselor.name }}</h2><p class="counselor-title">{{ counselor.title }}</p><p>{{ counselor.bio }}</p>
           <div class="tag-row"><Badge v-for="area in counselor.areas.slice(0,3)" :key="area">{{ area }}</Badge></div>
           <div class="counselor-meta"><span><Icon name="Languages" :size="16" /> {{ counselor.language || "Languages not listed" }}</span></div>
-          <RouterLink class="card-link" :to="`/counselors/${counselor.id}`">View profile <Icon name="ArrowRight" :size="16" /></RouterLink>
+          <RouterLink class="card-link" :to="counselorFlowUrl(`/counselors/${counselor.id}`)">View profile <Icon name="ArrowRight" :size="16" /></RouterLink>
         </article>
       </div>
+      <div v-if="counselorLoading" class="empty-state" role="status"><p>Finding eligible counselors…</p></div>
       <Notice v-if="counselorLoadError" title="Counselor directory unavailable" tone="warning">{{ counselorLoadError }}</Notice>
-      <div v-else-if="!filteredCounselors.length" class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ liveCounselors.length ? 'No counselor matches those filters' : 'No approved counselor profiles are available yet' }}</h3><p>{{ liveCounselors.length ? 'Try another language or a broader search.' : 'Please check back later or contact ShepherdConnect support.' }}</p></div>
+      <div v-else-if="!counselorLoading && !filteredCounselors.length" class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ liveCounselors.length ? 'No counselor matches those filters' : state.need === 'Other' && !state.preferredCategoryId && !state.browseAllCounselors ? 'Choose a category to find a counselor' : 'No counselors are currently available in this category' }}</h3><p>{{ liveCounselors.length ? 'Try another language or a broader search.' : state.need === 'Other' && !state.preferredCategoryId && !state.browseAllCounselors ? 'Select a preferred category or choose to view all available counselors.' : 'Please choose another category or try again later.' }}</p></div>
     </div>
   </main>
 
   <main v-else-if="route.name === 'counselor-profile' && selectedCounselor" class="flow-page">
     <div class="flow-top"><Brand /></div>
     <div class="profile-shell">
-      <button class="back-link" @click="go('/counselors')"><Icon name="ArrowLeft" :size="17" /> All counselors</button>
+      <button class="back-link" @click="go(counselorFlowUrl('/counselors'))"><Icon name="ArrowLeft" :size="17" /> All counselors</button>
       <div class="profile-layout">
         <aside class="profile-summary">
-          <span :class="`counselor-avatar avatar-lg avatar-${selectedCounselor.color}`">{{ selectedCounselor.initials }}</span><h1>{{ selectedCounselor.name }}</h1><p>{{ selectedCounselor.title }}</p><Badge tone="success"><Icon name="ShieldCheck" :size="14" /> GCML approved</Badge>
+          <ProfileAvatar :src="selectedCounselor.pictureUrl ? apiUrl(selectedCounselor.pictureUrl) : null" :name="selectedCounselor.name" size="large" /><h1>{{ selectedCounselor.name }}</h1><p>{{ selectedCounselor.title }}</p><Badge tone="success"><Icon name="ShieldCheck" :size="14" /> GCML approved</Badge>
           <div class="profile-facts"><span><Icon name="Languages" :size="17" /><b>Languages</b><small>{{ selectedCounselor.language || "Not listed" }}</small></span></div>
-          <BaseButton @click="go(`/request/${selectedCounselor.id}`)">Request counseling <Icon name="ArrowRight" /></BaseButton><small class="no-guarantee">Availability and response times are not guaranteed.</small>
+          <BaseButton @click="go(counselorFlowUrl(`/request/${selectedCounselor.id}`))">Request counseling <Icon name="ArrowRight" /></BaseButton><small class="no-guarantee">Availability and response times are not guaranteed.</small>
         </aside>
         <main class="profile-body">
           <section><span class="section-kicker">About</span><h2>About {{ selectedCounselor.name }}</h2><p>{{ selectedCounselor.bio || "This counselor has not added an introduction yet." }}</p></section>
@@ -1926,12 +2346,35 @@ function counselorInitials(name: string) {
   <main v-else-if="route.name === 'request' && selectedCounselor" class="flow-page">
     <div class="flow-top"><Brand /></div>
     <div class="request-shell">
-      <button class="back-link" @click="go(`/counselors/${selectedCounselor.id}`)"><Icon name="ArrowLeft" :size="17" /> Back</button>
+      <button class="back-link" @click="go(counselorFlowUrl(`/counselors/${selectedCounselor.id}`))"><Icon name="ArrowLeft" :size="17" /> Back</button>
       <div class="request-layout">
         <div class="request-copy">
           <Badge tone="blue"><Icon name="LockKeyhole" :size="14" /> Private request</Badge><h1>Start a conversation with {{ selectedCounselor.name }}</h1><p>Share only what feels necessary. Your counselor will see this after the request is assigned to them.</p>
-          <div class="mini-counselor"><span :class="`counselor-avatar avatar-${selectedCounselor.color}`">{{ selectedCounselor.initials }}</span><div><strong>{{ selectedCounselor.name }}</strong><small>{{ selectedCounselor.title }}</small></div></div>
+          <div class="mini-counselor"><ProfileAvatar :src="selectedCounselor.pictureUrl ? apiUrl(selectedCounselor.pictureUrl) : null" :name="selectedCounselor.name" size="medium" /><div><strong>{{ selectedCounselor.name }}</strong><small>{{ selectedCounselor.title }}</small><small>Support category: {{ selectedSupportCategory?.label || state.need }}</small></div></div>
           <Notice :title="state.accessMode === 'private' ? 'You’re using Private mode' : 'You’re using profile mode'">{{ state.accessMode === 'private' ? 'Your counselor will see a generated alias, not your real name.' : 'Your chosen display name may be shown to your counselor.' }}</Notice>
+          <Notice v-if="activeSupportCategoryId() && !selectedCounselorSupportsCategory" title="Choose a matching counselor" tone="warning">
+            This counselor is not approved for the selected category. Return to the directory and choose an eligible counselor.
+          </Notice>
+          <Field v-if="!activeSupportCategoryId() && selectedCounselor.specialtyIds.length" label="Choose a support category for this request">
+            <select
+              class="control"
+              required
+              :value="state.preferredCategoryId || ''"
+              @change="chooseSupportCategory(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">Select a category</option>
+              <option
+                v-for="category in supportCategories.filter((item) => selectedCounselor?.specialtyIds.includes(item.id))"
+                :key="category.id"
+                :value="category.id"
+              >
+                {{ category.label }}
+              </option>
+            </select>
+          </Field>
+          <Notice v-else-if="!activeSupportCategoryId()" title="Counselor categories unavailable" tone="warning">
+            This counselor has no approved support categories available for a request. Please choose another counselor or try again later.
+          </Notice>
         </div>
         <form class="form-card" @submit.prevent="submitRequest">
           <Field label="What would you like to talk about?"><input v-model="topic" class="control" maxlength="120" required placeholder="A short topic, e.g. anxiety about school" /></Field>
@@ -1968,6 +2411,7 @@ function counselorInitials(name: string) {
           v-if="authMode === 'create' && accountType === 'counselor'"
           :busy="authLoading"
           :error="authStatus"
+          :support-categories="supportCategories"
           @submit="submitCounselorApplication"
         />
         <form v-else class="auth-fields" @submit.prevent="submitAuth">
@@ -1978,6 +2422,27 @@ function counselorInitials(name: string) {
           </template>
           <template v-else>
             <Field v-if="authMode === 'create' && accountType === 'registered'" label="Display name"><input v-model="accountName" class="control" required maxlength="80" autocomplete="name" /></Field>
+            <template v-if="authMode === 'create' && accountType === 'registered'">
+              <Field label="Age range — optional" hint="This private information is not shown on your public profile.">
+                <select v-model="registrationAgeRange" class="control">
+                  <option value="">Prefer not to provide</option>
+                  <option value="under_18">Under 18</option>
+                  <option value="18_24">18–24</option>
+                  <option value="25_34">25–34</option>
+                  <option value="35_44">35–44</option>
+                  <option value="45_54">45–54</option>
+                  <option value="55_plus">55 and above</option>
+                  <option value="prefer_not_to_say">Prefer not to say</option>
+                </select>
+              </Field>
+              <Field label="Gender — optional" hint="This private information is not shared with counselors or other users.">
+                <select v-model="registrationGender" class="control">
+                  <option value="" disabled>Select gender</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                </select>
+              </Field>
+            </template>
             <Field v-if="authMode === 'create' && accountType === 'registered'" label="Profile picture — optional" hint="JPEG, PNG, or WebP; up to 5 MB. You can change or remove it later.">
               <div class="profile-picture-field">
                 <ProfileAvatar
@@ -2127,8 +2592,8 @@ function counselorInitials(name: string) {
         </template>
         <div v-else class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No active request</h3><p>Choose an approved counselor when you’re ready.</p><BaseButton @click="go('/needs')">Find support</BaseButton></div>
       </section>
-      <section class="journey-preview"><div class="card-heading"><div><span class="section-kicker">Counsel → Guide → Disciple</span><h2>Your journey</h2></div><RouterLink to="/journey">View journey</RouterLink></div><div class="journey-line"><div v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'complete' : index === currentJourneyStage ? 'active' : ''"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="13" /><template v-else>{{ index + 1 }}</template></span><small>{{ stage.name }}</small></div></div><p v-if="currentJourneyStage === null">Your journey has not started. Explore the stages when you are ready.</p><p v-else><strong>Current stage:</strong> {{ journeyStages[currentJourneyStage].name }}</p></section>
-      <section class="quick-links"><h2>Quick actions</h2><button @click="go('/guidance')"><span><Icon name="BookOpen" :size="20" /></span><div><strong>Browse resources</strong><small>Approved guidance when available</small></div><Icon name="ChevronRight" /></button><button @click="go('/needs')"><span><Icon name="HeartHandshake" :size="20" /></span><div><strong>Find another counselor</strong><small>Browse approved profiles</small></div><Icon name="ChevronRight" /></button><button @click="go('/counseling')"><span><Icon name="Flag" :size="20" /></span><div><strong>Report a concern</strong><small>Contact safeguarding support</small></div><Icon name="ChevronRight" /></button></section>
+      <section class="journey-preview"><div class="card-heading"><div><span class="section-kicker">Counsel → Guide → Disciple</span><h2>Your journey</h2></div><RouterLink to="/journey">My journey</RouterLink></div><div class="journey-line"><div v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'complete' : index === currentJourneyStage ? 'active' : ''"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="13" /><template v-else>{{ index + 1 }}</template></span><small>{{ stage.name }}</small></div></div><p v-if="currentJourneyStage === null && journeyCompletedCount === 0">Your journey has not started. Explore the stages when you are ready.</p><p v-else-if="currentJourneyStage === null"><strong>Journey complete:</strong> all {{ journeyStages.length }} stages completed.</p><p v-else><strong>Next stage:</strong> {{ journeyStages[currentJourneyStage].name }} · {{ journeyProgressPercent }}% complete</p></section>
+      <section class="quick-links"><h2>Quick actions</h2><button @click="go('/journey')"><span><Icon name="Sprout" :size="20" /></span><div><strong>My discipleship journey</strong><small>Continue or update your growth steps</small></div><Icon name="ChevronRight" /></button><button @click="go('/guidance')"><span><Icon name="BookOpen" :size="20" /></span><div><strong>Browse resources</strong><small>Approved guidance when available</small></div><Icon name="ChevronRight" /></button><button @click="go('/needs')"><span><Icon name="HeartHandshake" :size="20" /></span><div><strong>Find another counselor</strong><small>Browse approved profiles</small></div><Icon name="ChevronRight" /></button><button @click="go('/counseling')"><span><Icon name="Flag" :size="20" /></span><div><strong>Report a concern</strong><small>Contact safeguarding support</small></div><Icon name="ChevronRight" /></button></section>
     </div>
   </AppShell>
 
@@ -2145,18 +2610,23 @@ function counselorInitials(name: string) {
           <div v-if="!counselorCases.some((item) => item.status === 'Pending')" class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No new requests</h3><p>New assigned requests will appear here.</p></div>
         </template>
       </section>
-      <section class="panel"><div class="card-heading"><div><span class="section-kicker">Continue care</span><h2>Active conversations</h2></div><RouterLink to="/counseling">View all</RouterLink></div>
-        <button v-for="conversation in realConversations" :key="conversation.public_id" class="conversation-row" @click="selectConversation(conversation.public_id); go('/counseling')"><span class="private-avatar"><Icon name="EyeOff" :size="17" /></span><div><strong>{{ conversation.other_party_display_name || conversation.other_party_public_id }}</strong><small>Assigned private conversation</small></div><span>{{ conversation.status }}</span></button><p v-if="!realConversations.length" class="empty-state">No assigned conversations.</p>
+      <section class="panel"><div class="card-heading"><div><span class="section-kicker">Continue care</span><h2>Active conversations</h2></div><div><RouterLink to="/counselor/disciples">View disciples</RouterLink> · <RouterLink to="/counseling">View all</RouterLink></div></div>
+        <button v-for="conversation in realConversations" :key="conversation.public_id" class="conversation-row" @click="selectConversation(conversation.public_id); go('/counseling')"><span v-if="conversation.other_party_is_anonymous" class="private-avatar"><Icon name="EyeOff" :size="17" /></span><ProfileAvatar v-else :src="conversation.other_party_picture_url ? apiUrl(conversation.other_party_picture_url) : null" :name="conversation.other_party_display_name || conversation.other_party_public_id" size="small" /><div><strong>{{ conversation.other_party_display_name || conversation.other_party_public_id }}</strong><small>Assigned private conversation</small></div><span>{{ conversation.status }}</span></button><p v-if="!realConversations.length" class="empty-state">No assigned conversations.</p>
       </section>
     </div>
     </template>
+  </AppShell>
+
+  <AppShell v-else-if="route.name === 'counselor-disciples'" title="Disciples" eyebrow="People you have counseled">
+    <Notice v-if="account.user && account.user.role !== 'counselor'" title="This page is not available">Only assigned counselors can view their counseling relationships.</Notice>
+    <CounselorDisciples v-else />
   </AppShell>
 
   <AppShell v-else-if="route.name === 'counseling'" :title="`Private counseling${currentConversation ? ` · ${currentConversation.otherPartyName || currentConversation.otherPartyPublicId}` : ''}`" eyebrow="Your conversations">
     <template #action><BaseButton variant="danger" @click="leaveConversation"><Icon name="ArrowRight" :size="17" /> Quick Exit</BaseButton></template>
     <div class="room-layout">
       <section class="chat-panel">
-        <header class="chat-person"><span class="private-avatar"><Icon name="EyeOff" :size="18" /></span><div><strong>{{ currentConversation?.otherPartyName || currentConversation?.otherPartyPublicId || "No assigned conversation" }}</strong><small><span class="status-dot" /> {{ currentConversation?.status === 'open' ? 'Assigned private conversation' : currentConversation ? 'Conversation history · resolved' : 'No open conversation' }}</small></div><button @click="reportOpen = true"><Icon name="Flag" :size="17" /> Report a concern</button></header>
+        <header class="chat-person"><span v-if="!currentConversation || currentConversation.otherPartyIsAnonymous" class="private-avatar"><Icon name="EyeOff" :size="18" /></span><ProfileAvatar v-else :src="currentConversation.otherPartyPictureUrl ? apiUrl(currentConversation.otherPartyPictureUrl) : null" :name="currentConversation.otherPartyName || currentConversation.otherPartyPublicId" size="medium" /><div><strong>{{ currentConversation?.otherPartyName || currentConversation?.otherPartyPublicId || "No assigned conversation" }}</strong><small><span class="status-dot" /> {{ currentConversation?.status === 'open' ? 'Assigned private conversation' : currentConversation ? 'Conversation history · resolved' : 'No open conversation' }}</small></div><button @click="reportOpen = true"><Icon name="Flag" :size="17" /> Report a concern</button></header>
         <Notice title="Private conversation">Only you and your assigned counselor can access this room. Avoid unnecessary identifying information.</Notice>
         <label v-if="account.user && realConversations.length > 1" class="conversation-picker">
           <span>Conversation history</span>
@@ -2183,7 +2653,7 @@ function counselorInitials(name: string) {
               <textarea v-model="editDraft" class="control textarea" rows="3" maxlength="4000" aria-label="Edit message" />
               <div><BaseButton type="submit">Save</BaseButton><BaseButton type="button" variant="secondary" @click="cancelMessageEdit">Cancel</BaseButton></div>
             </form>
-            <p v-else>{{ message.text }}</p>
+            <p v-else class="message-body"><template v-for="(segment, index) in messageSegments(message.text)" :key="index"><a v-if="segment.href" :href="segment.href" target="_blank" rel="noopener noreferrer">{{ segment.text }}</a><template v-else>{{ segment.text }}</template></template></p>
             <span>
               {{ message.time }}
               <template v-if="message.edited"> · Edited</template>
@@ -2208,11 +2678,14 @@ function counselorInitials(name: string) {
         </div>
         <p v-if="chatError" class="form-error" role="alert">{{ chatError }}</p>
         <p v-if="messageActionError" class="form-error" role="alert">{{ messageActionError }}</p>
-        <div class="share-tools"><button @click="go('/guidance')"><Icon name="BookOpen" :size="17" /> Scripture</button><button @click="chatText = 'Could we pause and pray about this together?'"><Icon name="Heart" :size="17" /> Prayer</button><button @click="go('/guidance')"><Icon name="Plus" :size="17" /> Resource</button></div>
-        <form v-if="currentConversation?.status === 'open'" class="composer" @submit.prevent="submitMessage"><textarea v-model="chatText" class="control textarea" maxlength="4000" rows="2" placeholder="Type a private message…" aria-label="Message" /><BaseButton type="submit" :disabled="messageSending" :aria-label="messageSending ? 'Sending message' : 'Send message'"><span v-if="messageSending" aria-live="polite">Sending…</span><Icon v-else name="Send" /></BaseButton></form>
+        <div class="share-tools"><button @click="go('/guidance')"><Icon name="BookOpen" :size="17" /> Scripture</button><button @click="chatText = 'Could we pause and pray about this together?'"><Icon name="Heart" :size="17" /> Prayer</button><button v-if="account.user?.role === 'counselor'" :disabled="!currentConversation || currentConversation.status !== 'open'" @click="openResourceDialog"><Icon name="Plus" :size="17" /> Add resource</button><button v-else @click="go('/guidance')"><Icon name="Plus" :size="17" /> Resources</button></div>
+        <p v-if="resourceDraftConversationPublicId" class="resource-draft-status" role="status">Resource draft for {{ resourceDraftRecipient }}. Review it below before sending.<button type="button" @click="discardResourceDraft">Discard draft</button></p>
+        <p v-if="resourceDraftConversationPublicId && currentConversation?.publicId !== resourceDraftConversationPublicId" class="form-error" role="alert">This draft is for a different conversation. Select the intended person or discard the draft before sending.</p>
+        <form v-if="currentConversation?.status === 'open'" class="composer" @submit.prevent="submitMessage"><textarea v-model="chatText" class="control textarea" maxlength="4000" rows="2" placeholder="Type a private message…" aria-label="Message" /><BaseButton type="submit" :disabled="messageSending || Boolean(resourceDraftConversationPublicId && currentConversation.publicId !== resourceDraftConversationPublicId)" :aria-label="messageSending ? 'Sending message' : 'Send message'"><span v-if="messageSending" aria-live="polite">Sending…</span><Icon v-else name="Send" /></BaseButton></form>
       </section>
       <aside class="room-aside"><div><span class="section-kicker">Conversation</span><h3>Private conversation</h3><p>Messages are visible to the assigned participants.</p></div><div class="safety-card"><Icon name="ShieldCheck" :size="22" /><h3>Need help?</h3><p>Report a concern without sharing more identity information.</p><button @click="reportOpen = true">Contact safeguarding</button></div></aside>
     </div>
+    <div v-if="resourceDialogOpen" class="modal-backdrop" role="presentation" @mousedown.self="resourceDialogOpen = false"><form class="modal resource-form" role="dialog" aria-modal="true" aria-labelledby="resource-title" @submit.prevent="prepareResourceForSend"><span class="modal-icon"><Icon name="BookOpen" :size="24" /></span><h2 id="resource-title">Add a resource</h2><p>This will prepare a message for {{ currentConversation?.otherPartyName || currentConversation?.otherPartyPublicId }}. Review and send it from the conversation when you are ready.</p><label class="field"><span>Resource title</span><input v-model="resourceTitle" class="control" required maxlength="160" autocomplete="off" /></label><label class="field"><span>HTTPS resource link</span><input v-model="resourceUrl" class="control" type="url" required maxlength="2048" placeholder="https://…" autocomplete="url" /></label><label class="field"><span>Optional note</span><textarea v-model="resourceNote" class="control textarea" rows="3" maxlength="1000" placeholder="Add a short note for the person receiving it." /></label><p v-if="resourceError" class="form-error" role="alert">{{ resourceError }}</p><div class="modal-actions"><BaseButton type="button" variant="secondary" @click="resourceDialogOpen = false">Cancel</BaseButton><BaseButton type="submit">Prepare message</BaseButton></div></form></div>
     <div v-if="reportOpen" class="modal-backdrop" role="presentation" @mousedown.self="reportOpen = false"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="report-title"><span class="modal-icon"><Icon name="Flag" :size="24" /></span><h2 id="report-title">Report a concern</h2><p>Share only what the safeguarding team needs to review the concern. This does not provide emergency help.</p><Notice v-if="reportStatus" title="Update" tone="success">{{ reportStatus }}</Notice><Field v-else label="What happened?"><textarea v-model="reportText" class="control textarea" rows="5" maxlength="1000" /></Field><div class="modal-actions"><BaseButton variant="secondary" @click="reportOpen = false">Close</BaseButton><BaseButton v-if="!reportStatus" :disabled="reportLoading" @click="submitReport">{{ reportLoading ? 'Submitting…' : 'Submit securely' }}</BaseButton></div></div></div>
   </AppShell>
 
@@ -2221,8 +2694,10 @@ function counselorInitials(name: string) {
   </AppShell>
 
   <AppShell v-else-if="route.name === 'journey'" title="My discipleship journey" eyebrow="Growing in Christ">
-    <section class="journey-hero"><div><Badge tone="success"><Icon name="Sprout" :size="14" />{{ currentJourneyStage === null ? " Not started" : ` Stage ${currentJourneyStage + 1} of 6` }}</Badge><h2>Your journey is about faithful steps, not a score.</h2><p>Discipleship is voluntary. You can pause, decline, or talk with your counselor about a different next step.</p></div></section>
-    <section class="journey-panel"><div class="journey-stages"><button v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'completed' : index === currentJourneyStage ? 'current' : ''" @click="updateJourneyStage(index)"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="16" /><template v-else>{{ index + 1 }}</template></span><div><small>Stage {{ index + 1 }}</small><strong>{{ stage.name }}</strong><p>{{ stage.detail }}</p></div><Badge v-if="index === currentJourneyStage" tone="blue">In progress</Badge></button></div><aside class="next-step-card"><span class="section-kicker">Your next step</span><span class="next-icon"><Icon name="CalendarDays" :size="24" /></span><h2>{{ currentJourneyStage === null ? "Choose a stage" : "Continue at your pace" }}</h2><p>Select a stage to record that you are exploring it. Your journey is voluntary and does not affect account access.</p><BaseButton @click="updateJourneyStage(currentJourneyStage === null ? 0 : Math.min(5, currentJourneyStage + 1))">{{ currentJourneyStage === null ? "Start your journey" : "Mark next stage in progress" }}</BaseButton></aside></section>
+    <section class="journey-hero"><div><Badge tone="success"><Icon name="Sprout" :size="14" />{{ journeyCompletedCount === journeyStages.length ? " Journey complete" : currentJourneyStage === null ? " Not started" : ` Stage ${currentJourneyStage + 1} of ${journeyStages.length}` }}</Badge><h2>Your journey is about faithful steps, not a score.</h2><p>Discipleship is voluntary. You can pause, decline, or talk with your counselor about a different next step.</p><p class="journey-progress-label">Progress: {{ journeyProgressPercent }}%</p></div></section>
+    <p v-if="journeyError" class="form-error" role="alert">{{ journeyError }}</p>
+    <div v-if="journeyLoading" class="empty-state" role="status"><span><Icon name="Clock3" :size="26" /></span><h2>Loading your journey</h2><p>Your saved progress is being retrieved.</p></div>
+    <section v-else class="journey-panel"><div class="journey-stages"><button v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'completed' : index === currentJourneyStage ? 'current' : ''" :disabled="journeySavingStage !== null || index !== currentJourneyStage" :aria-label="`Stage ${index + 1}: ${stage.name}${journeyStageCompleted(index) ? ', completed' : index === currentJourneyStage ? ', next stage' : ', locked until earlier stages are completed'}`" @click="updateJourneyStage(index, 'in_progress')"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="16" /><template v-else>{{ index + 1 }}</template></span><div><small>Stage {{ index + 1 }}</small><strong>{{ stage.name }}</strong><p>{{ stage.detail }}</p></div><Badge v-if="journeyStageCompleted(index)" tone="success">Completed</Badge><Badge v-else-if="index === currentJourneyStage" tone="blue">{{ realJourney[stage.name] === "in_progress" ? "In progress" : "Next step" }}</Badge><small v-else>Complete earlier stages first</small></button></div><aside class="next-step-card"><span class="section-kicker">Your next step</span><span class="next-icon"><Icon name="CalendarDays" :size="24" /></span><h2>{{ journeyCompletedCount === journeyStages.length ? "Journey complete" : currentJourneyStage === null ? "Choose a stage" : "Continue at your pace" }}</h2><p v-if="journeyCompletedCount === journeyStages.length">You have completed all {{ journeyStages.length }} stages. You can revisit any stage at any time.</p><p v-else>Select the next stage in sequence. Start it, then mark it complete to unlock the following stage. Your journey is voluntary and does not affect account access.</p><BaseButton v-if="journeyCompletedCount < journeyStages.length" :disabled="journeySavingStage !== null" @click="updateJourneyPrimaryStage">{{ currentJourneyStage === null ? "Start your journey" : realJourney[journeyStages[currentJourneyStage].name] === "in_progress" ? "Mark stage complete" : "Start this stage" }}</BaseButton></aside></section>
   </AppShell>
 
   <AppShell v-else-if="route.name === 'admin'" title="Administration" eyebrow="GCML operations">
@@ -2293,6 +2768,7 @@ function counselorInitials(name: string) {
           <div><dt>Preferred display name</dt><dd>{{ adminApplication.preferredDisplayName }}</dd></div>
           <div><dt>Account / email</dt><dd>{{ adminApplication.publicId }} · {{ adminApplication.email }}</dd></div>
           <div><dt>Specialization</dt><dd>{{ adminApplication.specialization }}</dd></div>
+          <div><dt>Requested support categories</dt><dd>{{ adminApplication.supportCategories.join(", ") || "None selected" }}</dd></div>
           <div><dt>Short biography</dt><dd>{{ adminApplication.biography }}</dd></div>
         </dl>
 
@@ -2382,14 +2858,44 @@ function counselorInitials(name: string) {
     <section v-else-if="adminTab === 'Counselors'" class="panel admin-panel">
       <div class="table-tools"><label class="search-control"><Icon name="Search" :size="18" /><input v-model="adminSearch" placeholder="Search counselor profiles" /></label></div>
       <div class="data-table"><div class="table-row table-head"><span>Counselor</span><span>Service areas</span><span>Approval</span><span>Account</span><span /></div>
-        <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Counselor"><b>{{ user.displayName || user.publicId }}</b><small>{{ user.publicId }}</small></span><span data-label="Service areas">{{ user.areas?.join(', ') || 'Not set' }}</span><span data-label="Approval"><Badge :tone="user.approved ? 'success' : 'warning'">{{ user.approved ? 'Approved' : 'Legacy record' }}</Badge></span><span data-label="Account">{{ user.status }}</span><span /></div>
+        <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Counselor"><b>{{ user.displayName || user.publicId }}</b><small>{{ user.publicId }}</small></span><span data-label="Service areas">{{ user.areas?.join(', ') || 'Not set' }}</span><span data-label="Approval"><Badge :tone="user.approved ? 'success' : 'warning'">{{ user.approved ? 'Approved' : 'Legacy record' }}</Badge></span><span data-label="Account">{{ user.status }}</span><span data-label="Matching categories"><button v-if="user.approved && user.status === 'active'" class="inline-action" type="button" @click="openSpecialtyEditor(user)">Manage matching categories</button><span v-else>Unavailable</span></span></div>
+      </div>
+      <div v-if="specialtyEditor" class="admin-confirm-overlay" @keydown.esc="specialtyEditor = null">
+        <section class="admin-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="specialty-editor-title">
+          <span class="section-kicker">Approved counselor profile</span>
+          <h2 id="specialty-editor-title">Matching categories for {{ specialtyEditor.displayName || specialtyEditor.publicId }}</h2>
+          <p>Only select categories this active counselor is approved to provide. Changes take effect immediately and are recorded in the audit log.</p>
+          <label v-for="category in supportCategories" :key="category.id" class="check-label">
+            <input v-model="specialtyEditorIds" type="checkbox" :value="category.id" />
+            <span>{{ category.label }}</span>
+          </label>
+          <p v-if="!supportCategories.length" class="form-error" role="alert">Support categories could not be loaded. Reload the page and try again.</p>
+          <p v-if="specialtyEditorError" class="form-error" role="alert">{{ specialtyEditorError }}</p>
+          <div class="admin-confirm-actions">
+            <BaseButton variant="secondary" :disabled="specialtyEditorSaving" @click="specialtyEditor = null">Cancel</BaseButton>
+            <BaseButton :disabled="specialtyEditorSaving || !supportCategories.length" @click="saveCounselorSpecialties">{{ specialtyEditorSaving ? 'Saving…' : 'Save approved categories' }}</BaseButton>
+          </div>
+        </section>
       </div>
     </section>
     <section v-else-if="adminTab === 'Users'" class="panel admin-panel">
       <label class="search-control"><Icon name="Search" :size="18" /><input v-model="adminSearch" placeholder="Search by public ID or display name" /></label>
-      <Notice title="Account access">Changing a status revokes existing sessions. Staff roles never grant message access by themselves.</Notice>
-      <div class="data-table"><div class="table-row table-head"><span>Account</span><span>Type</span><span>Role</span><span>Status</span><span>Created</span></div>
-        <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Account"><b>{{ user.displayName || 'Private account' }}</b><small>{{ user.publicId }}</small></span><span data-label="Type">{{ user.accountType }}</span><span data-label="Role"><select v-if="user.accountType === 'registered' && user.role !== 'counselor'" class="control compact-select" :value="user.role" @change="selectAdminRole(user, $event)"><option value="registered">Registered user</option><option value="superadmin">SuperAdmin</option></select><span v-else-if="user.accountType === 'counselor'">{{ user.role === 'counselor' ? 'Approved counselor' : 'Counselor applicant' }}</span><span v-else-if="user.role === 'counselor'">Legacy counselor</span><span v-else>Anonymous user</span></span><span data-label="Status"><select class="control compact-select" :value="user.status" @change="selectAdminStatus(user, $event)"><option value="active">Active</option><option value="suspended">Suspended</option><option value="deactivated">Deactivated</option></select></span><span data-label="Created">{{ new Date(user.createdAt).toLocaleDateString() }}</span></div>
+      <p v-if="account.error" class="form-error" role="alert">{{ account.error }}</p>
+      <Notice title="Account access">Changing a status revokes existing sessions. Staff roles never grant message access by themselves. Anonymizing an account removes sign-in credentials and account profile contact details, while counselor profile/application details, documents, counseling, messages, and audit records are retained. Counselor application details and documents may contain identifying information.</Notice>
+      <div class="data-table admin-users-table"><div class="table-row table-head"><span>Account</span><span>Type</span><span>Role</span><span>Status</span><span>Created</span><span>Account actions</span></div>
+        <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Account"><b>{{ user.displayName || 'Private account' }}</b><small>{{ user.publicId }}<template v-if="user.anonymized"> · Anonymized</template></small></span><span data-label="Type">{{ user.accountType }}</span><span data-label="Role"><select v-if="user.accountType === 'registered' && user.role !== 'counselor'" class="control compact-select" :value="user.role" :disabled="user.anonymized" @change="selectAdminRole(user, $event)"><option value="registered">Registered user</option><option value="superadmin">SuperAdmin</option></select><span v-else-if="user.accountType === 'counselor'">{{ user.role === 'counselor' ? 'Approved counselor' : 'Counselor applicant' }}</span><span v-else-if="user.role === 'counselor'">Legacy counselor</span><span v-else>Anonymous user</span></span><span data-label="Status"><select class="control compact-select" :value="user.status" :disabled="user.anonymized" @change="selectAdminStatus(user, $event)"><option value="active">Active</option><option value="suspended">Suspended</option><option value="deactivated">Deactivated</option></select></span><span data-label="Created">{{ new Date(user.createdAt).toLocaleDateString() }}</span><span data-label="Account actions"><button v-if="!user.anonymized && user.role !== 'superadmin'" class="inline-action admin-delete-user" type="button" @click="requestUserAnonymization(user)">Anonymize &amp; deactivate</button><span v-else-if="user.anonymized">Completed</span><span v-else>Protected</span></span></div>
+      </div>
+      <div v-if="pendingUserAnonymization" class="admin-confirm-overlay" @keydown.esc="cancelUserAnonymization">
+        <section class="admin-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="anonymize-user-title" aria-describedby="anonymize-user-description">
+          <span class="section-kicker">Irreversible account action</span>
+          <h2 id="anonymize-user-title">Anonymize and deactivate {{ pendingUserAnonymization.publicId }}?</h2>
+          <p id="anonymize-user-description">This removes sign-in access, email, account display name and bio, and profile picture, and revokes all sessions. Counseling, counselor profile and application details, documents, conversations, messages, and audit records remain; counselor application details and documents may contain identifying information.</p>
+          <p v-if="anonymizationError" class="form-error" role="alert">{{ anonymizationError }}</p>
+          <div class="admin-confirm-actions">
+            <BaseButton variant="secondary" autofocus :disabled="anonymizationLoading" @click="cancelUserAnonymization">Cancel</BaseButton>
+            <BaseButton variant="danger" :disabled="anonymizationLoading" @click="confirmUserAnonymization">{{ anonymizationLoading ? "Working…" : "Anonymize and deactivate" }}</BaseButton>
+          </div>
+        </section>
       </div>
     </section>
     <section v-else-if="adminTab === 'Safeguarding'" class="panel admin-panel">
@@ -2467,13 +2973,9 @@ function counselorInitials(name: string) {
     </template>
   </AppShell>
 
-  <AppShell v-else-if="route.name === 'reports'" title="Impact reports" eyebrow="Aggregate insights">
-    <Notice v-if="account.user && account.user.role !== 'superadmin'" title="This page is not available">Aggregate reports are limited to authorized SuperAdmins.</Notice>
-    <template v-else>
-    <Notice title="Privacy-protective aggregate reporting">Reports contain aggregate operational counts only. Counts below five are suppressed to reduce re-identification risk.</Notice>
-    <div class="stats-row reports"><div><span><Icon name="Users" :size="20" /></span><small>Total accounts</small><strong>{{ reportValue('accounts') }}</strong><em>Small totals are suppressed</em></div><div><span><Icon name="HeartHandshake" :size="20" /></span><small>Requests accepted</small><strong>{{ reportValue('accepted_requests') }}</strong><em>Aggregate only</em></div><div><span><Icon name="MessageCircle" :size="20" /></span><small>Active engagements</small><strong>{{ reportValue('open_conversations') }}</strong><em>Aggregate only</em></div><div><span><Icon name="Sprout" :size="20" /></span><small>Completed path stages</small><strong>{{ reportValue('completed_stages') }}</strong><em>Voluntary participation</em></div></div>
-    <p class="report-footnote">A “connection” means a counseling request accepted by its assigned counselor. Targets, substantive-engagement definitions, and journey completion rules require GCML approval before production reporting.</p>
-    </template>
+  <AppShell v-else-if="route.name === 'reports'" title="Analytics" eyebrow="Live aggregate insights">
+    <Notice v-if="account.user && account.user.role !== 'superadmin'" title="This page is not available">Platform analytics are limited to authorized SuperAdmins.</Notice>
+    <AdminAnalytics v-else />
   </AppShell>
 
   <AppShell v-else-if="route.name === 'account-settings'" title="Account settings" eyebrow="Your ShepherdConnect account">
@@ -2519,10 +3021,39 @@ function counselorInitials(name: string) {
         <div class="settings-actions"><BaseButton variant="secondary" :disabled="profileLoading" @click="rotateRecoveryCode">{{ profileLoading ? 'Please wait…' : 'Rotate recovery code' }}</BaseButton><BaseButton variant="danger" :disabled="profileLoading" @click="deactivateAccount">Deactivate account</BaseButton></div>
         <p
           v-if="profileStatus && !recoveryCode"
-          :class="['Account profile updated.', 'Counselor profile updated.', 'Profile picture updated.', 'Profile picture removed.'].includes(profileStatus) ? 'settings-success' : 'form-error'"
-          :role="['Account profile updated.', 'Counselor profile updated.', 'Profile picture updated.', 'Profile picture removed.'].includes(profileStatus) ? 'status' : 'alert'"
+          :class="['Account profile updated.', 'Counselor profile updated.', 'Private profile information updated.', 'Profile picture updated.', 'Profile picture removed.'].includes(profileStatus) ? 'settings-success' : 'form-error'"
+          :role="['Account profile updated.', 'Counselor profile updated.', 'Private profile information updated.', 'Profile picture updated.', 'Profile picture removed.'].includes(profileStatus) ? 'status' : 'alert'"
         >{{ profileStatus }}</p>
         <div v-if="recoveryCode" class="recovery-display settings-recovery" aria-live="polite"><strong>{{ profileStatus }}</strong><code>{{ recoveryCode }}</code><BaseButton variant="secondary" @click="copyRecoveryCode">{{ recoveryCopied ? 'Copied' : 'Copy recovery code' }}</BaseButton><small>This code is shown only now. Save it securely; the old code is invalid.</small></div>
+      </section>
+      <section v-if="account.user.accountType !== 'anonymous'" class="panel settings-card">
+        <span class="section-kicker">Private profile information</span>
+        <h2>Age range and gender</h2>
+        <p>These optional details are private to your account and are not used to match you with counselors.</p>
+        <form class="settings-form" @submit.prevent="saveDemographics">
+          <Field label="Age range — optional">
+            <select v-model="profileAgeRange" class="control">
+              <option value="">Prefer not to provide</option>
+              <option value="under_18">Under 18</option>
+              <option value="18_24">18–24</option>
+              <option value="25_34">25–34</option>
+              <option value="35_44">35–44</option>
+              <option value="45_54">45–54</option>
+              <option value="55_plus">55 and above</option>
+              <option value="prefer_not_to_say">Prefer not to say</option>
+            </select>
+          </Field>
+          <Field label="Gender — optional">
+            <select v-model="profileGender" class="control">
+              <option value="" disabled>Select gender</option>
+              <option value="male">Male</option>
+              <option value="female">Female</option>
+            </select>
+          </Field>
+          <BaseButton type="submit" variant="secondary" :disabled="profileLoading">
+            {{ profileLoading ? 'Saving…' : 'Save private information' }}
+          </BaseButton>
+        </form>
       </section>
       <section
         v-if="account.user.accountType === 'registered' && account.user.role === 'registered'"
@@ -2535,6 +3066,7 @@ function counselorInitials(name: string) {
           :busy="authLoading"
           :error="authStatus"
           :existing-account="true"
+          :support-categories="supportCategories"
           @submit="submitCounselorApplication"
         />
       </section>

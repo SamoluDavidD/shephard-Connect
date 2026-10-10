@@ -38,6 +38,12 @@ const navigation = [
     roles: ["counselor"],
   },
   {
+    to: "/counselor/disciples",
+    label: "Disciples",
+    icon: "Users",
+    roles: ["counselor"],
+  },
+  {
     to: "/counselor-application",
     label: "Application status",
     icon: "GraduationCap",
@@ -49,7 +55,7 @@ const navigation = [
     icon: "ShieldCheck",
     roles: ["admin"],
   },
-  { to: "/reports", label: "Reports", icon: "Users", roles: ["admin"] },
+  { to: "/reports", label: "Analytics", icon: "BarChart3", roles: ["admin"] },
   { to: "/settings", label: "Account settings", icon: "Settings", roles: ["seeker", "counselor", "admin", "applicant"] },
 ]
 const currentRole = computed(() => {
@@ -67,6 +73,7 @@ const pageAccess = computed(() => {
     "seeker-dashboard",
     "account-settings",
     "counselor-dashboard",
+    "counselor-disciples",
     "counselor-application",
     "counseling",
     "guidance",
@@ -96,7 +103,8 @@ const pageAccess = computed(() => {
   ) {
     return "denied"
   }
-  if (routeName === "counselor-dashboard" && account.user.role !== "counselor") {
+  if (["counselor-dashboard", "counselor-disciples"].includes(routeName) &&
+    account.user.role !== "counselor") {
     return "denied"
   }
   if (["admin", "reports"].includes(routeName) && account.user.role !== "superadmin") {

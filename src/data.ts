@@ -1,19 +1,22 @@
 export const needs = [
   {
+    id: "prayer-spiritual-growth",
     title: "Prayer & spiritual growth",
     note: "Prayer, faith, and drawing closer to God",
   },
   {
+    id: "relationships-marriage",
     title: "Relationships / marriage",
     note: "Conflict, dating, family, and marriage",
   },
   {
+    id: "bible-questions",
     title: "Bible questions",
     note: "Understand Scripture with a trusted guide",
   },
-  { title: "School / career", note: "Discernment, purpose, study, and work" },
-  { title: "Personal growth", note: "Habits, character, and life direction" },
-  { title: "Other", note: "Something not listed here" },
+  { id: "school-career", title: "School / career", note: "Discernment, purpose, study, and work" },
+  { id: "personal-growth", title: "Personal growth", note: "Habits, character, and life direction" },
+  { id: "other", title: "Other", note: "Something not listed here" },
 ]
 
 export const journeyStages = [

@@ -70,13 +70,23 @@ const authSchema = z.object({
 const registeredSchema = authSchema.extend({
   email: z.string().trim().email().max(254),
   displayName: z.string().trim().min(1).max(80),
+  ageRange: z.enum([
+    "under_18", "18_24", "25_34", "35_44", "45_54", "55_plus", "prefer_not_to_say",
+  ]).nullable().optional().transform((value) => value ?? null),
+  gender: z.enum(["male", "female"]).nullable().optional().transform((value) => value ?? null),
 })
 const optionalText = (max) =>
   z.union([z.string().trim().max(max), z.null()])
     .optional()
     .transform((value) => typeof value === "string" && value ? value : null)
+const supportCategoryIdsSchema = z.array(z.string().trim().min(1).max(80))
+  .min(1).max(12).refine((ids) => new Set(ids).size === ids.length)
 const counselorApplicationSchema = authSchema.extend({
   email: z.string().trim().email().max(254),
+  ageRange: z.enum([
+    "under_18", "18_24", "25_34", "35_44", "45_54", "55_plus", "prefer_not_to_say",
+  ]).nullable().optional().transform((value) => value ?? null),
+  gender: z.enum(["male", "female"]).nullable().optional().transform((value) => value ?? null),
   fullLegalName: z.string().trim().min(1).max(160),
   preferredDisplayName: optionalText(80),
   phone: optionalText(40),
@@ -95,6 +105,7 @@ const counselorApplicationSchema = authSchema.extend({
   licenseExpiry: z.string().date().nullable().optional().transform((value) => value ?? null),
   biography: optionalText(5000),
   areasOfExpertise: z.array(z.string().trim().min(1).max(80)).max(12).nullable().optional().transform((value) => value ?? []),
+  supportCategoryIds: supportCategoryIdsSchema,
   languages: z.array(z.string().trim().min(1).max(80)).max(12).nullable().optional().transform((value) => value ?? []),
   workHistory: optionalText(5000),
   referencesText: optionalText(3000),
@@ -106,6 +117,7 @@ const existingCounselorApplicationSchema = z.object({
   fullLegalName: z.string().trim().min(1).max(160),
   preferredDisplayName: optionalText(80),
   specialization: z.string().trim().min(1).max(160),
+  supportCategoryIds: supportCategoryIdsSchema,
   codeOfConductAccepted: z.literal(true),
   confidentialityAccepted: z.literal(true),
   safeguardingAccepted: z.literal(true),
@@ -208,6 +220,14 @@ function validateBody(schema, req, res) {
   return result.data
 }
 
+async function hasActiveSupportCategories(client, categoryIds) {
+  const result = await client.query(
+    "SELECT id FROM support_categories WHERE id = ANY($1::text[]) AND active = true",
+    [categoryIds],
+  )
+  return result.rowCount === categoryIds.length
+}
+
 async function appendAudit(client, actorId, action, targetType, targetId = null, metadata = {}) {
   await client.query(
     `INSERT INTO audit_logs (actor_id, action, target_type, target_id, metadata)
@@ -226,7 +246,14 @@ async function issueSession(client, userId, res, secure) {
   writeSessionCookie(res, token, secure)
 }
 
-async function createAccount(client, { accountType, email, displayName, password }) {
+async function createAccount(client, {
+  accountType,
+  email,
+  displayName,
+  password,
+  ageRange = null,
+  gender = null,
+}) {
   const publicId = createPublicId(
     accountType === "anonymous" ? "AN" : accountType === "counselor" ? "CA" : "SC",
   )
@@ -251,8 +278,16 @@ async function createAccount(client, { accountType, email, displayName, password
     [user.id, email || null, normalizedEmail, passwordHash, recoveryCodeHash],
   )
   await client.query(
-    `INSERT INTO user_profiles (user_id, display_name) VALUES ($1, $2)`,
-    [user.id, displayName || null],
+    `INSERT INTO user_profiles
+       (user_id, display_name, age_range, gender, gender_description)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      user.id,
+      displayName || null,
+      accountType === "anonymous" ? null : ageRange,
+      accountType === "anonymous" ? null : gender,
+      null,
+    ],
   )
   await client.query(
     `INSERT INTO discipleship_progress (user_id, stage)
@@ -314,6 +349,17 @@ async function removePrivateDocuments(storageKeys, directory = privateDocumentDi
   )
 }
 
+async function readProfilePicture(profile, directory = privateDocumentDirectory) {
+  if (!profile?.picture_storage_key) return null
+  if (!/^[a-f0-9]{64}$/.test(profile.picture_storage_key)) {
+    throw new Error("Stored profile picture key is invalid.")
+  }
+  return {
+    contents: await readFile(path.join(directory, profile.picture_storage_key)),
+    mimeType: profile.picture_mime_type,
+  }
+}
+
 function publicDocumentMetadata(row) {
   return {
     id: row.id,
@@ -335,8 +381,10 @@ function safeAccountRecord(row) {
     status: row.status,
     displayName: row.display_name || null,
     createdAt: row.created_at,
+    anonymized: Boolean(row.anonymized_at),
     approved: row.approved ?? undefined,
     areas: row.areas ?? undefined,
+    approvedCategoryIds: row.approved_category_ids ?? undefined,
     safeguardingReview: row.safeguarding_review ?? undefined,
   }
 }
@@ -521,6 +569,8 @@ export function createApp({
           email: input.email,
           displayName: input.displayName,
           password: input.password,
+          ageRange: input.ageRange,
+          gender: input.gender,
         })
         if (req.file && pictureMimeType) {
           const storageKey = await savePrivateDocument(req.file, privateDocumentPath)
@@ -569,6 +619,9 @@ export function createApp({
       if (!parsed.success) {
         return res.status(400).json({ error: "Check the submitted counselor application." })
       }
+      if (!(await hasActiveSupportCategories(pool, parsed.data.supportCategoryIds))) {
+        return res.status(400).json({ error: "Choose active counselor support categories." })
+      }
 
       const categoryByField = {
         qualificationDocuments: "qualification",
@@ -612,6 +665,8 @@ export function createApp({
             email: input.email,
             displayName: input.preferredDisplayName,
             password: input.password,
+            ageRange: input.ageRange,
+            gender: input.gender,
           })
           if (profilePicture && profilePictureMimeType) {
             const storageKey = await savePrivateDocument(profilePicture, privateDocumentPath)
@@ -632,10 +687,10 @@ export function createApp({
                certifications, years_experience, license_number, licensing_authority,
                license_expiry, biography, areas_of_expertise, languages, work_history,
                references_text, code_of_conduct_accepted, confidentiality_accepted,
-               safeguarding_accepted
+               safeguarding_accepted, support_category_ids
              ) VALUES (
                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-               $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+               $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
              ) RETURNING id, status, submitted_at`,
             [
               applicationRef,
@@ -664,6 +719,7 @@ export function createApp({
               input.codeOfConductAccepted,
               input.confidentialityAccepted,
               input.safeguardingAccepted,
+              input.supportCategoryIds,
             ],
           )
           const application = applicationResult.rows[0]
@@ -747,6 +803,9 @@ export function createApp({
     }
     const input = validateBody(existingCounselorApplicationSchema, req, res)
     if (!input) return
+    if (!(await hasActiveSupportCategories(pool, input.supportCategoryIds))) {
+      return res.status(400).json({ error: "Choose active counselor support categories." })
+    }
     try {
       const result = await inTransaction(pool, async (client) => {
         const existing = await client.query(
@@ -765,10 +824,10 @@ export function createApp({
              certifications, years_experience, license_number, licensing_authority,
              license_expiry, biography, areas_of_expertise, languages, work_history,
              references_text, code_of_conduct_accepted, confidentiality_accepted,
-             safeguarding_accepted
+             safeguarding_accepted, support_category_ids
            ) VALUES (
              $1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, NULL, NULL, NULL, NULL,
-             NULL, NULL, NULL, NULL, NULL, NULL, '{}', '{}', NULL, NULL, true, true, true
+             NULL, NULL, NULL, NULL, NULL, NULL, '{}', '{}', NULL, NULL, true, true, true, $6
            ) RETURNING id, status, submitted_at`,
           [
             applicationRef,
@@ -776,6 +835,7 @@ export function createApp({
             input.fullLegalName,
             preferredDisplayName,
             input.specialization,
+            input.supportCategoryIds,
           ],
         )
         const application = created.rows[0]
@@ -925,7 +985,7 @@ export function createApp({
   app.get("/api/me/profile", requireAuth, async (req, res, next) => {
     try {
       const result = await pool.query(
-        `SELECT display_name, bio, picture_storage_key, updated_at
+        `SELECT display_name, bio, age_range, gender, picture_storage_key, updated_at
          FROM user_profiles WHERE user_id = $1`,
         [req.user.id],
       )
@@ -935,6 +995,8 @@ export function createApp({
         profile: {
           displayName: profile.display_name,
           bio: profile.bio,
+          ageRange: profile.age_range,
+          gender: profile.gender,
           pictureUrl: profile.picture_storage_key
             ? `/me/profile/picture?v=${encodeURIComponent(new Date(profile.updated_at).toISOString())}`
             : null,
@@ -956,16 +1018,13 @@ export function createApp({
       if (!profile?.picture_storage_key) {
         return res.status(404).json({ error: "No profile picture is set." })
       }
-      if (!/^[a-f0-9]{64}$/.test(profile.picture_storage_key)) {
-        throw new Error("Stored profile picture key is invalid.")
-      }
-      const contents = await readFile(path.join(privateDocumentPath, profile.picture_storage_key))
+      const picture = await readProfilePicture(profile, privateDocumentPath)
       res.set({
         "Cache-Control": "private, no-store",
-        "Content-Type": profile.picture_mime_type,
+        "Content-Type": picture.mimeType,
         "X-Content-Type-Options": "nosniff",
       })
-      res.send(contents)
+      res.send(picture.contents)
     } catch (error) {
       if (error.code === "ENOENT") {
         return res.status(404).json({ error: "Profile picture is unavailable." })
@@ -1299,17 +1358,38 @@ export function createApp({
       z.object({
         displayName: z.string().trim().min(1).max(80).nullable(),
         bio: z.string().trim().max(1000).optional(),
+        ageRange: z.enum([
+          "under_18", "18_24", "25_34", "35_44", "45_54", "55_plus", "prefer_not_to_say",
+        ]).nullable().optional(),
+        gender: z.enum(["male", "female"]).nullable().optional(),
       }),
       req,
       res,
     )
     if (!input) return
+    const hasDemographics = ["ageRange", "gender"]
+      .some((key) => Object.hasOwn(req.body, key))
+    if (req.user.account_type === "anonymous" && hasDemographics) {
+      return res.status(403).json({ error: "Private accounts do not collect demographic information." })
+    }
     try {
       const result = await pool.query(
         `UPDATE user_profiles
-         SET display_name = $2, bio = COALESCE($3, bio), updated_at = now()
+         SET display_name = $2, bio = COALESCE($3, bio),
+             age_range = CASE WHEN $4 THEN $5 ELSE age_range END,
+             gender = CASE WHEN $6 THEN $7 ELSE gender END,
+             gender_description = CASE WHEN $6 THEN NULL ELSE gender_description END,
+             updated_at = now()
          WHERE user_id = $1 RETURNING display_name`,
-        [req.user.id, input.displayName, input.bio ?? null],
+        [
+          req.user.id,
+          input.displayName,
+          input.bio ?? null,
+          Object.hasOwn(req.body, "ageRange"),
+          input.ageRange ?? null,
+          Object.hasOwn(req.body, "gender"),
+          input.gender ?? null,
+        ],
       )
       await appendAudit(pool, req.user.id, "profile.updated", "user", req.user.id)
       res.json({ user: { ...authUser(req), displayName: result.rows[0].display_name } })
@@ -1472,10 +1552,96 @@ export function createApp({
     }
   })
 
+  app.get("/api/support-categories", async (_req, res, next) => {
+    try {
+      const result = await pool.query(
+        "SELECT id, label FROM support_categories WHERE active = true ORDER BY label",
+      )
+      res.json({ categories: result.rows })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/counselors/matches", async (req, res, next) => {
+    const categoryId = typeof req.query.categoryId === "string"
+      ? req.query.categoryId.trim()
+      : null
+    const browseAll = req.query.all === "true"
+    if ((!browseAll && !categoryId) || (browseAll && categoryId)) {
+      return res.status(400).json({
+        error: "Choose a support category or explicitly select all available counselors.",
+      })
+    }
+    try {
+      if (categoryId) {
+        const category = await pool.query(
+          "SELECT id FROM support_categories WHERE id = $1 AND active = true",
+          [categoryId],
+        )
+        if (!category.rowCount) {
+          return res.status(400).json({ error: "Choose an active support category." })
+        }
+      }
+      const result = await pool.query(
+        `SELECT u.public_id, p.display_name, c.headline, c.bio, c.areas, c.languages,
+                p.picture_storage_key, p.updated_at AS profile_updated_at,
+                ARRAY(
+                  SELECT specialty_category.label
+                  FROM counselor_specialties specialty
+                  JOIN support_categories specialty_category
+                    ON specialty_category.id = specialty.category_id
+                  WHERE specialty.counselor_id = c.user_id
+                    AND specialty.approved = true AND specialty_category.active = true
+                  ORDER BY specialty_category.label
+                ) AS specialties,
+                ARRAY(
+                  SELECT specialty.category_id
+                  FROM counselor_specialties specialty
+                  WHERE specialty.counselor_id = c.user_id
+                    AND specialty.approved = true
+                  ORDER BY specialty.category_id
+                ) AS specialty_ids
+         FROM counselor_profiles c
+         JOIN users u ON u.id = c.user_id
+         LEFT JOIN user_profiles p ON p.user_id = u.id
+         WHERE c.approved = true AND u.status = 'active' AND u.role = 'counselor'
+           AND (
+             $1::text IS NULL
+             OR EXISTS (
+               SELECT 1 FROM counselor_specialties match
+               WHERE match.counselor_id = c.user_id
+                 AND match.category_id = $1 AND match.approved = true
+             )
+           )
+         ORDER BY p.display_name`,
+        [categoryId],
+      )
+      res.json({
+        counselors: result.rows.map((row) => ({
+          publicId: row.public_id,
+          displayName: row.display_name,
+          headline: row.headline,
+          bio: row.bio,
+          areas: [...new Set([...(row.areas || []), ...(row.specialties || [])])],
+          specialties: row.specialties || [],
+          specialtyIds: row.specialty_ids || [],
+          languages: row.languages,
+          pictureUrl: row.picture_storage_key
+            ? `/counselors/${encodeURIComponent(row.public_id)}/picture?v=${encodeURIComponent(new Date(row.profile_updated_at).toISOString())}`
+            : null,
+        })),
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.get("/api/counselors", async (_req, res, next) => {
     try {
       const result = await pool.query(
-        `SELECT u.public_id, p.display_name, c.headline, c.bio, c.areas, c.languages
+        `SELECT u.public_id, p.display_name, c.headline, c.bio, c.areas, c.languages,
+                p.picture_storage_key, p.updated_at AS profile_updated_at
          FROM counselor_profiles c
          JOIN users u ON u.id = c.user_id
          LEFT JOIN user_profiles p ON p.user_id = u.id
@@ -1490,9 +1656,39 @@ export function createApp({
           bio: row.bio,
           areas: row.areas,
           languages: row.languages,
+          pictureUrl: row.picture_storage_key
+            ? `/counselors/${encodeURIComponent(row.public_id)}/picture?v=${encodeURIComponent(new Date(row.profile_updated_at).toISOString())}`
+            : null,
         })),
       })
     } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/counselors/:publicId/picture", async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT p.picture_storage_key, p.picture_mime_type
+         FROM users u
+         JOIN counselor_profiles c ON c.user_id = u.id
+         JOIN user_profiles p ON p.user_id = u.id
+         WHERE u.public_id = upper($1) AND u.status = 'active'
+           AND u.role = 'counselor' AND c.approved = true`,
+        [req.params.publicId],
+      )
+      const picture = await readProfilePicture(result.rows[0], privateDocumentPath)
+      if (!picture) return res.status(404).json({ error: "The requested record was not found." })
+      res.set({
+        "Cache-Control": "public, max-age=300",
+        "Content-Type": picture.mimeType,
+        "X-Content-Type-Options": "nosniff",
+      })
+      res.send(picture.contents)
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return res.status(404).json({ error: "The requested record was not found." })
+      }
       next(error)
     }
   })
@@ -1844,11 +2040,13 @@ export function createApp({
     try {
       const seeker = req.user.role === "anonymous" || req.user.role === "registered"
       const result = await pool.query(
-        `SELECT r.public_ref, r.need, r.topic, r.description, r.status, r.created_at,
+        `SELECT r.public_ref, r.need, r.support_category_id, category.label AS support_category_label,
+                r.topic, r.description, r.status, r.created_at,
                 seeker.public_id AS seeker_public_id,
                 counselor.public_id AS counselor_public_id,
                 counselor_profile.display_name AS counselor_name
          FROM counseling_requests r
+         LEFT JOIN support_categories category ON category.id = r.support_category_id
          JOIN users seeker ON seeker.id = r.seeker_id
          JOIN users counselor ON counselor.id = r.counselor_id
          LEFT JOIN user_profiles counselor_profile ON counselor_profile.user_id = counselor.id
@@ -1867,6 +2065,7 @@ export function createApp({
       z.object({
         counselorPublicId: z.string().trim().min(4).max(24),
         need: z.string().trim().min(1).max(120),
+        supportCategoryId: z.string().trim().min(1).max(80),
         topic: z.string().trim().min(3).max(160),
         description: z.string().trim().max(4000).default(""),
       }),
@@ -1876,24 +2075,37 @@ export function createApp({
     if (!input) return
     try {
       const result = await inTransaction(pool, async (client) => {
+        const category = await client.query(
+          `SELECT id FROM support_categories
+           WHERE id = $1 AND active = true
+             AND ($2 = 'Other' OR label = $2 OR $2 = ANY(aliases))`,
+          [input.supportCategoryId, input.need],
+        )
+        if (!category.rowCount) return { invalidCategory: true }
         const counselor = await client.query(
           `SELECT c.user_id FROM counselor_profiles c
            JOIN users u ON u.id = c.user_id
            WHERE u.public_id = upper($1) AND u.status = 'active'
-             AND u.role = 'counselor' AND c.approved = true`,
-          [input.counselorPublicId],
+             AND u.role = 'counselor' AND c.approved = true
+             AND EXISTS (
+               SELECT 1 FROM counselor_specialties specialty
+               WHERE specialty.counselor_id = c.user_id
+                 AND specialty.category_id = $2 AND specialty.approved = true
+             )`,
+          [input.counselorPublicId, input.supportCategoryId],
         )
-        if (!counselor.rows[0]) return null
+        if (!counselor.rows[0]) return { unavailable: true }
         const created = await client.query(
           `INSERT INTO counseling_requests
-             (public_ref, seeker_id, counselor_id, need, topic, description)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING public_ref, need, topic, status, created_at`,
+             (public_ref, seeker_id, counselor_id, need, support_category_id, topic, description)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING public_ref, need, support_category_id, topic, status, created_at`,
           [
             createPublicId("CR"),
             req.user.id,
             counselor.rows[0].user_id,
             input.need,
+            input.supportCategoryId,
             input.topic,
             input.description,
           ],
@@ -1907,7 +2119,14 @@ export function createApp({
         await appendAudit(client, req.user.id, "counseling_request.created", "counseling_request", null)
         return created.rows[0]
       })
-      if (!result) return res.status(404).json({ error: "That counselor is not available." })
+      if (result.invalidCategory) {
+        return res.status(400).json({ error: "Choose a valid support category for this request." })
+      }
+      if (result.unavailable) {
+        return res.status(404).json({
+          error: "That counselor is not available for the selected support category.",
+        })
+      }
       res.status(201).json({ request: result })
     } catch (error) {
       next(error)
@@ -1983,16 +2202,48 @@ export function createApp({
   app.get("/api/counselor/cases", requireAuth, requireRole("counselor"), async (req, res, next) => {
     try {
       const result = await pool.query(
-        `SELECT r.public_ref, r.need, r.topic, r.description, r.status, r.created_at,
+        `SELECT r.public_ref, r.need, category.label AS support_category_label,
+                r.topic, r.description, r.status, r.created_at,
                 seeker.public_id AS seeker_public_id,
                 conversation.public_id AS conversation_public_id
          FROM counseling_requests r
+         LEFT JOIN support_categories category ON category.id = r.support_category_id
          JOIN users seeker ON seeker.id = r.seeker_id
          LEFT JOIN counseling_conversations conversation ON conversation.request_id = r.id
          WHERE r.counselor_id = $1 ORDER BY r.created_at DESC`,
         [req.user.id],
       )
       res.json({ cases: result.rows })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/counselor/disciples", requireAuth, requireRole("counselor"), async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT seeker.public_id AS seeker_public_id,
+                seeker.account_type = 'anonymous' AS is_anonymous,
+                CASE WHEN seeker.account_type = 'anonymous' THEN seeker.public_id
+                     ELSE COALESCE(seeker_profile.display_name, seeker.public_id)
+                END AS display_name,
+                count(DISTINCT r.id)::int AS counseling_count,
+                count(DISTINCT conversation.id)::int AS conversation_count,
+                count(DISTINCT conversation.id) FILTER (WHERE conversation.status = 'open')::int AS open_conversations,
+                max(GREATEST(r.updated_at, COALESCE(conversation.updated_at, r.updated_at))) AS last_activity_at,
+                bool_or(r.status = 'Accepted') AS has_active_counseling,
+                array_agg(DISTINCT category.label) FILTER (WHERE category.label IS NOT NULL) AS support_categories
+         FROM counseling_requests r
+         JOIN users seeker ON seeker.id = r.seeker_id
+         LEFT JOIN user_profiles seeker_profile ON seeker_profile.user_id = seeker.id
+         LEFT JOIN counseling_conversations conversation ON conversation.request_id = r.id
+         LEFT JOIN support_categories category ON category.id = r.support_category_id
+         WHERE r.counselor_id = $1 AND r.status IN ('Accepted', 'Closed')
+         GROUP BY seeker.id, seeker.public_id, seeker.account_type, seeker_profile.display_name
+         ORDER BY max(GREATEST(r.updated_at, COALESCE(conversation.updated_at, r.updated_at))) DESC`,
+        [req.user.id],
+      )
+      res.json({ disciples: result.rows })
     } catch (error) {
       next(error)
     }
@@ -2013,6 +2264,9 @@ export function createApp({
       const result = await pool.query(
         `SELECT c.public_id, c.status, c.updated_at,
                 other.public_id AS other_party_public_id,
+                other.account_type AS other_party_account_type,
+                profile.picture_storage_key,
+                profile.updated_at AS other_party_profile_updated_at,
                 CASE WHEN other.account_type = 'anonymous' THEN other.public_id
                      ELSE COALESCE(profile.display_name, other.public_id)
                 END AS other_party_display_name
@@ -2023,8 +2277,63 @@ export function createApp({
          ORDER BY c.updated_at DESC`,
         [req.user.id],
       )
-      res.json({ conversations: result.rows })
+      res.json({
+        conversations: result.rows.map((row) => ({
+          public_id: row.public_id,
+          status: row.status,
+          updated_at: row.updated_at,
+          other_party_public_id: row.other_party_public_id,
+          other_party_display_name: row.other_party_display_name,
+          other_party_is_anonymous: row.other_party_account_type === "anonymous",
+          other_party_picture_url:
+            row.other_party_account_type !== "anonymous" && row.picture_storage_key
+              ? `/conversations/${encodeURIComponent(row.public_id)}/other-party-picture?v=${encodeURIComponent(new Date(row.other_party_profile_updated_at).toISOString())}`
+              : null,
+        })),
+      })
     } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/conversations/:publicId/other-party-picture", requireAuth, async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT c.seeker_id, c.counselor_id
+         FROM counseling_conversations c
+         WHERE c.public_id = upper($1)`,
+        [req.params.publicId],
+      )
+      const conversation = result.rows[0]
+      if (!conversation || !canAccessConversation(req.user, conversation)) {
+        return res.status(404).json({ error: "The requested record was not found." })
+      }
+      const otherPartyId =
+        conversation.seeker_id === req.user.id
+          ? conversation.counselor_id
+          : conversation.seeker_id
+      const profileResult = await pool.query(
+        `SELECT u.account_type, p.picture_storage_key, p.picture_mime_type
+         FROM users u LEFT JOIN user_profiles p ON p.user_id = u.id
+         WHERE u.id = $1`,
+        [otherPartyId],
+      )
+      const otherParty = profileResult.rows[0]
+      if (!otherParty || otherParty.account_type === "anonymous") {
+        return res.status(404).json({ error: "The requested record was not found." })
+      }
+      const picture = await readProfilePicture(otherParty, privateDocumentPath)
+      if (!picture) return res.status(404).json({ error: "The requested record was not found." })
+      res.set({
+        "Cache-Control": "private, no-store",
+        "Content-Type": picture.mimeType,
+        "X-Content-Type-Options": "nosniff",
+      })
+      res.send(picture.contents)
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return res.status(404).json({ error: "The requested record was not found." })
+      }
       next(error)
     }
   })
@@ -2248,17 +2557,61 @@ export function createApp({
     )
     if (!input) return
     try {
-      const result = await pool.query(
-        `INSERT INTO discipleship_progress (user_id, stage, status, completed_at)
-         VALUES ($1, $2, $3, CASE WHEN $3 = 'completed' THEN now() ELSE NULL END)
-         ON CONFLICT (user_id, stage) DO UPDATE
-         SET status = EXCLUDED.status, updated_at = now(),
-             completed_at = CASE WHEN EXCLUDED.status = 'completed' THEN now() ELSE NULL END
-         RETURNING stage, status, updated_at, completed_at`,
-        [req.user.id, req.params.stage, input.status],
-      )
-      await appendAudit(pool, req.user.id, "journey.progress_updated", "journey", req.user.id)
-      res.json({ progress: result.rows[0] })
+      const result = await inTransaction(pool, async (client) => {
+        const progressResult = await client.query(
+          `SELECT stage, status FROM discipleship_progress
+           WHERE user_id = $1
+           ORDER BY array_position($2::text[], stage)
+           FOR UPDATE`,
+          [req.user.id, stages],
+        )
+        const progress = new Map(progressResult.rows.map((item) => [item.stage, item.status]))
+        const currentIndex = stages.findIndex((stage) => progress.get(stage) !== "completed")
+        const requestedIndex = stages.indexOf(req.params.stage)
+        if (requestedIndex !== currentIndex) {
+          return {
+            outOfOrder: true,
+            currentStage: currentIndex < 0 ? null : stages[currentIndex],
+          }
+        }
+        if (
+          input.status === "completed" &&
+          progress.get(req.params.stage) !== "in_progress"
+        ) {
+          return { notInProgress: true }
+        }
+        await client.query(
+          `UPDATE discipleship_progress
+           SET status = 'not_started', completed_at = NULL, updated_at = now()
+           WHERE user_id = $1
+             AND array_position($2::text[], stage) > $3
+             AND status <> 'not_started'`,
+          [req.user.id, stages, requestedIndex + 1],
+        )
+        const updated = await client.query(
+          `INSERT INTO discipleship_progress (user_id, stage, status, completed_at)
+           VALUES ($1, $2, $3, CASE WHEN $3 = 'completed' THEN now() ELSE NULL END)
+           ON CONFLICT (user_id, stage) DO UPDATE
+           SET status = EXCLUDED.status, updated_at = now(),
+               completed_at = CASE WHEN EXCLUDED.status = 'completed' THEN now() ELSE NULL END
+           RETURNING stage, status, updated_at, completed_at`,
+          [req.user.id, req.params.stage, input.status],
+        )
+        await appendAudit(client, req.user.id, "journey.progress_updated", "journey", req.user.id)
+        return { progress: updated.rows[0] }
+      })
+      if (result.outOfOrder) {
+        return res.status(409).json({
+          error: result.currentStage
+            ? `Complete the journey stages in order. Your next stage is ${result.currentStage}.`
+            : "All journey stages are already completed.",
+          currentStage: result.currentStage,
+        })
+      }
+      if (result.notInProgress) {
+        return res.status(409).json({ error: "Start this stage before marking it complete." })
+      }
+      res.json(result)
     } catch (error) {
       next(error)
     }
@@ -2298,6 +2651,8 @@ export function createApp({
       const result = await pool.query(
         `SELECT a.public_ref, a.status, a.full_legal_name, a.preferred_display_name,
                 a.professional_title, a.specialization, a.submitted_at,
+                ARRAY(SELECT label FROM support_categories
+                      WHERE id = ANY(a.support_category_ids) ORDER BY label) AS support_categories,
                 u.public_id, u.status AS account_status
          FROM counselor_applications a
          JOIN users u ON u.id = a.user_id
@@ -2313,6 +2668,7 @@ export function createApp({
           preferredDisplayName: row.preferred_display_name,
           professionalTitle: row.professional_title,
           specialization: row.specialization,
+          supportCategories: row.support_categories || [],
           submittedAt: row.submitted_at,
           publicId: row.public_id,
           accountStatus: row.account_status,
@@ -2326,7 +2682,10 @@ export function createApp({
   app.get("/api/admin/counselor-applications/:publicRef", requireAuth, requireAdmin, async (req, res, next) => {
     try {
       const result = await pool.query(
-        `SELECT a.*, u.public_id, u.status AS account_status,
+        `SELECT a.*,
+                ARRAY(SELECT label FROM support_categories
+                      WHERE id = ANY(a.support_category_ids) ORDER BY label) AS support_categories,
+                u.public_id, u.status AS account_status,
                 c.email, p.display_name
          FROM counselor_applications a
          JOIN users u ON u.id = a.user_id
@@ -2384,6 +2743,7 @@ export function createApp({
         licensing_authority: licensingAuthority,
         license_expiry: licenseExpiry,
         areas_of_expertise: areasOfExpertise,
+        support_categories: supportCategories,
         references_text: referencesText,
         work_history: workHistory,
         submitted_at: submittedAt,
@@ -2445,6 +2805,7 @@ export function createApp({
           licenseExpiry,
           biography,
           areasOfExpertise: areasOfExpertise || [],
+          supportCategories: supportCategories || [],
           languages: languages || [],
           workHistory,
           referencesText,
@@ -2701,6 +3062,15 @@ export function createApp({
               ],
             )
             await client.query(
+              `INSERT INTO counselor_specialties
+                 (counselor_id, category_id, approved, approved_at)
+               SELECT $1, category_id, true, now()
+               FROM unnest($2::text[]) AS category_id
+               ON CONFLICT (counselor_id, category_id)
+               DO UPDATE SET approved = true, approved_at = now()`,
+              [application.user_id, application.support_category_ids || []],
+            )
+            await client.query(
               `UPDATE user_profiles SET display_name = $2, updated_at = now()
                WHERE user_id = $1`,
               [application.user_id, application.preferred_display_name],
@@ -2836,6 +3206,68 @@ export function createApp({
     }
   })
 
+  app.patch("/api/admin/users/:publicId/specialties", requireAuth, requireAdmin, async (req, res, next) => {
+    const input = validateBody(
+      z.object({
+        categoryIds: z.array(z.string().trim().min(1).max(80)).max(12)
+          .refine((ids) => new Set(ids).size === ids.length),
+      }),
+      req,
+      res,
+    )
+    if (!input) return
+    try {
+      const result = await inTransaction(pool, async (client) => {
+        const target = await client.query(
+          `SELECT u.id FROM users u
+           JOIN counselor_profiles c ON c.user_id = u.id
+           WHERE u.public_id = upper($1) AND u.account_type = 'counselor'
+             AND u.role = 'counselor' AND u.status = 'active' AND c.approved = true
+           FOR UPDATE OF u, c`,
+          [req.params.publicId],
+        )
+        if (!target.rows[0]) return { unavailable: true }
+        const categoryIds = await client.query(
+          "SELECT id FROM support_categories WHERE id = ANY($1::text[]) AND active = true",
+          [input.categoryIds],
+        )
+        if (categoryIds.rowCount !== input.categoryIds.length) return { invalid: true }
+        const counselorId = target.rows[0].id
+        await client.query(
+          "DELETE FROM counselor_specialties WHERE counselor_id = $1",
+          [counselorId],
+        )
+        if (input.categoryIds.length) {
+          await client.query(
+            `INSERT INTO counselor_specialties
+               (counselor_id, category_id, approved, approved_at)
+             SELECT $1, requested.category_id, true, now()
+             FROM unnest($2::text[]) AS requested(category_id)`,
+            [counselorId, input.categoryIds],
+          )
+        }
+        await appendAudit(
+          client,
+          req.user.id,
+          "counselor.specialties_updated",
+          "user",
+          counselorId,
+          { categoryIds: input.categoryIds },
+        )
+        return { categoryIds: input.categoryIds }
+      })
+      if (result.unavailable) {
+        return res.status(404).json({ error: "Only active, approved counselors can receive support categories." })
+      }
+      if (result.invalid) {
+        return res.status(400).json({ error: "Choose only active support categories." })
+      }
+      res.json({ approvedCategoryIds: result.categoryIds })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.get("/api/admin/users", requireAuth, requireAdmin, async (req, res, next) => {
     const query = z.object({
       publicId: z.string().trim().max(24).optional(),
@@ -2848,7 +3280,14 @@ export function createApp({
     try {
       const result = await pool.query(
         `SELECT u.public_id, u.account_type, u.role, u.status, u.created_at,
+                u.anonymized_at,
                 p.display_name, c.approved, c.areas,
+                ARRAY(
+                  SELECT specialty.category_id
+                  FROM counselor_specialties specialty
+                  WHERE specialty.counselor_id = u.id AND specialty.approved = true
+                  ORDER BY specialty.category_id
+                ) AS approved_category_ids,
                 EXISTS (
                   SELECT 1 FROM user_permissions permission
                   WHERE permission.user_id = u.id
@@ -2874,6 +3313,86 @@ export function createApp({
     }
   })
 
+  app.delete("/api/admin/users/:publicId", requireAuth, requireAdmin, async (req, res, next) => {
+    let previousPictureKey = null
+    try {
+      const replacementPasswordHash = await argon2.hash(randomBytes(32).toString("hex"), passwordOptions)
+      const replacementRecoveryHash = await argon2.hash(randomBytes(32).toString("hex"), passwordOptions)
+      const result = await inTransaction(pool, async (client) => {
+        const found = await client.query(
+          `SELECT id, public_id, role, status, anonymized_at
+           FROM users WHERE public_id = upper($1) FOR UPDATE`,
+          [req.params.publicId],
+        )
+        const target = found.rows[0]
+        if (!target) return { missing: true }
+        if (target.id === req.user.id) return { self: true }
+        if (target.role === "superadmin") return { protected: true }
+        if (target.anonymized_at) return { alreadyAnonymized: true }
+
+        const picture = await client.query(
+          "SELECT picture_storage_key FROM user_profiles WHERE user_id = $1",
+          [target.id],
+        )
+        previousPictureKey = picture.rows[0]?.picture_storage_key || null
+
+        await client.query(
+          `UPDATE users SET status = 'deactivated', anonymized_at = now(), updated_at = now()
+           WHERE id = $1`,
+          [target.id],
+        )
+        await client.query(
+          `UPDATE user_credentials
+           SET email = NULL, email_normalized = NULL,
+               password_hash = $2, recovery_code_hash = $3, updated_at = now()
+           WHERE user_id = $1`,
+          [target.id, replacementPasswordHash, replacementRecoveryHash],
+        )
+        await client.query(
+          `UPDATE user_profiles
+           SET display_name = NULL, bio = '', age_range = NULL, gender = NULL,
+               gender_description = NULL, picture_storage_key = NULL,
+               picture_mime_type = NULL, updated_at = now()
+           WHERE user_id = $1`,
+          [target.id],
+        )
+        await client.query(
+          "UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+          [target.id],
+        )
+        await appendAudit(
+          client,
+          req.user.id,
+          "account.anonymized_and_deactivated",
+          "user",
+          target.id,
+          { publicId: target.public_id },
+        )
+        return { publicId: target.public_id }
+      })
+
+      if (result.missing) return res.status(404).json({ error: "The requested record was not found." })
+      if (result.self) return res.status(409).json({ error: "You cannot anonymize your own SuperAdmin account." })
+      if (result.protected) return res.status(409).json({ error: "SuperAdmin accounts cannot be anonymized through user management." })
+      if (result.alreadyAnonymized) return res.status(409).json({ error: "This account has already been anonymized." })
+
+      if (previousPictureKey) {
+        try {
+          await removePrivateDocuments([previousPictureKey], privateDocumentPath)
+        } catch (error) {
+          console.error("Could not remove the anonymized account profile picture:", error.message)
+          return res.json({
+            account: { publicId: result.publicId, status: "deactivated", anonymized: true },
+            warning: "The account was anonymized, but its stored profile picture could not be removed. Contact support.",
+          })
+        }
+      }
+      res.json({ account: { publicId: result.publicId, status: "deactivated", anonymized: true } })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.patch("/api/admin/users/:publicId/status", requireAuth, requireAdmin, async (req, res, next) => {
     const input = validateBody(accountStatusSchema, req, res)
     if (!input) return
@@ -2881,7 +3400,9 @@ export function createApp({
       const result = await inTransaction(pool, async (client) => {
         const updated = await client.query(
           `UPDATE users SET status = $2, updated_at = now()
-           WHERE public_id = upper($1) RETURNING id, public_id, status`,
+           WHERE public_id = upper($1)
+             AND (anonymized_at IS NULL OR $2 <> 'active')
+           RETURNING id, public_id, status`,
           [req.params.publicId, input.status],
         )
         if (!updated.rows[0]) return null
@@ -2896,7 +3417,16 @@ export function createApp({
         })
         return updated.rows[0]
       })
-      if (!result) return res.status(404).json({ error: "The requested record was not found." })
+      if (!result) {
+        const anonymized = await pool.query(
+          "SELECT 1 FROM users WHERE public_id = upper($1) AND anonymized_at IS NOT NULL",
+          [req.params.publicId],
+        )
+        if (anonymized.rowCount) {
+          return res.status(409).json({ error: "Anonymized accounts cannot be reactivated." })
+        }
+        return res.status(404).json({ error: "The requested record was not found." })
+      }
       res.json({ account: { publicId: result.public_id, status: result.status } })
     } catch (error) {
       next(error)
@@ -2909,10 +3439,10 @@ export function createApp({
     try {
       const result = await inTransaction(pool, async (client) => {
         const target = await client.query(
-          "SELECT id, role, account_type FROM users WHERE public_id = upper($1) FOR UPDATE",
+          "SELECT id, role, account_type, anonymized_at FROM users WHERE public_id = upper($1) FOR UPDATE",
           [req.params.publicId],
         )
-        if (!target.rows[0] || target.rows[0].account_type !== "registered") return null
+        if (!target.rows[0] || target.rows[0].account_type !== "registered" || target.rows[0].anonymized_at) return null
         const userId = target.rows[0].id
         if (input.role === "counselor" && target.rows[0].role !== "counselor") {
           return { applicationRequired: true }
@@ -3048,6 +3578,115 @@ export function createApp({
         }),
       )
       res.json({ minimumCohort: threshold, summary: report })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/admin/analytics", requireAuth, requireAdmin, async (req, res, next) => {
+    const periodDays = Number(req.query.days ?? 30)
+    if (![7, 30, 90].includes(periodDays)) {
+      return res.status(400).json({ error: "Choose an analytics period of 7, 30, or 90 days." })
+    }
+    const since = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000)
+    const threshold = 5
+    const aggregate = (value) => {
+      const count = Number(value || 0)
+      return count < threshold
+        ? { value: null, suppressed: true }
+        : { value: count, suppressed: false }
+    }
+    try {
+      const [metricsResult, trendsResult, statusesResult, categoriesResult, journeyResult] =
+        await Promise.all([
+          pool.query(
+            `SELECT
+               (SELECT count(*) FROM users) AS total_accounts,
+               (SELECT count(*) FROM users WHERE status = 'active') AS active_accounts,
+               (SELECT count(*) FROM users WHERE created_at >= $1) AS new_accounts,
+               (SELECT count(*) FROM users WHERE role = 'counselor' AND status = 'active') AS active_counselors,
+               (SELECT count(*) FROM counseling_requests WHERE created_at >= $1) AS new_requests,
+               (SELECT count(*) FROM counseling_requests WHERE created_at >= $1 AND status = 'Pending') AS pending_requests,
+               (SELECT count(*) FROM counseling_requests WHERE created_at >= $1 AND status = 'Accepted') AS accepted_requests,
+               (SELECT count(*) FROM counseling_requests WHERE created_at >= $1 AND status = 'Declined') AS declined_requests,
+               (SELECT count(*) FROM counseling_conversations WHERE status = 'open') AS open_conversations,
+               (SELECT count(*) FROM messages WHERE created_at >= $1) AS messages_sent,
+               (SELECT count(*) FROM discipleship_progress WHERE status = 'completed') AS completed_journey_stages`,
+            [since],
+          ),
+          pool.query(
+            `WITH buckets AS (
+               SELECT bucket, $1::timestamptz + ($2::int * bucket / 7) * interval '1 day' AS bucket_start,
+                      $1::timestamptz + ($2::int * (bucket + 1) / 7) * interval '1 day' AS bucket_end
+               FROM generate_series(0, 6) AS bucket
+             )
+             SELECT bucket, bucket_start, bucket_end,
+                    (SELECT count(*) FROM users
+                     WHERE created_at >= bucket_start AND created_at < bucket_end) AS new_accounts,
+                    (SELECT count(*) FROM counseling_requests
+                     WHERE created_at >= bucket_start AND created_at < bucket_end) AS new_requests,
+                    (SELECT count(*) FROM counseling_conversations
+                     WHERE created_at >= bucket_start AND created_at < bucket_end) AS new_conversations,
+                    (SELECT count(*) FROM discipleship_progress
+                     WHERE status = 'completed' AND completed_at >= bucket_start AND completed_at < bucket_end) AS completed_stages
+             FROM buckets ORDER BY bucket`,
+            [since, periodDays],
+          ),
+          pool.query(
+            `SELECT status, count(*) AS total
+             FROM counseling_requests
+             WHERE created_at >= $1
+             GROUP BY status`,
+            [since],
+          ),
+          pool.query(
+            `SELECT COALESCE(category.label, 'Uncategorized') AS label, count(*) AS total
+             FROM counseling_requests r
+             LEFT JOIN support_categories category ON category.id = r.support_category_id
+             WHERE r.created_at >= $1
+             GROUP BY category.label
+             ORDER BY count(*) DESC, label`,
+            [since],
+          ),
+          pool.query(
+            `SELECT stage, status, count(*) AS total
+             FROM discipleship_progress
+             GROUP BY stage, status
+             ORDER BY array_position($1::text[], stage), status`,
+            [stages],
+          ),
+        ])
+      const metrics = Object.fromEntries(
+        Object.entries(metricsResult.rows[0]).map(([key, value]) => [key, aggregate(value)]),
+      )
+      const trends = trendsResult.rows.map((row) => ({
+        label: new Date(row.bucket_start).toLocaleDateString("en", { month: "short", day: "numeric" }),
+        newAccounts: aggregate(row.new_accounts),
+        newRequests: aggregate(row.new_requests),
+        newConversations: aggregate(row.new_conversations),
+        completedStages: aggregate(row.completed_stages),
+      }))
+      const journey = Object.fromEntries(stages.map((stage) => [
+        stage,
+        Object.fromEntries(["not_started", "in_progress", "completed"].map((status) => {
+          const row = journeyResult.rows.find((item) => item.stage === stage && item.status === status)
+          return [status, aggregate(row?.total)]
+        })),
+      ]))
+      res.json({
+        generatedAt: new Date().toISOString(),
+        periodDays,
+        minimumCohort: threshold,
+        metrics,
+        trends,
+        requestStatuses: Object.fromEntries(
+          statusesResult.rows.map((row) => [row.status, aggregate(row.total)]),
+        ),
+        supportCategories: categoriesResult.rows
+          .filter((row) => Number(row.total) >= threshold)
+          .map((row) => ({ label: row.label, total: aggregate(row.total) })),
+        journey,
+      })
     } catch (error) {
       next(error)
     }

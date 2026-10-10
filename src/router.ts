@@ -27,6 +27,7 @@ const router = createRouter({
     { path: "/settings", name: "account-settings", component: App },
 
     { path: "/counselor", name: "counselor-dashboard", component: App },
+    { path: "/counselor/disciples", name: "counselor-disciples", component: App },
     { path: "/counselor-application", name: "counselor-application", component: App },
 
     { path: "/counseling", name: "counseling", component: App },

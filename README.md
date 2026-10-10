@@ -8,19 +8,24 @@ ShepherdConnect is a responsive Vue 3 application for the Great Commission Movem
 - Regular, anonymous, and counselor registration with server-validated account types
 - Counselor application status, SuperAdmin credential review, and approval-gated permissions
 - Optional private counselor document uploads and later responses to document requests
-- Need selection, approved counselor directory, filters, and profiles
+- Need selection, category-matched approved counselor directory, filters, and profiles
 - Validated counseling request workflow with idempotency and rate limiting
 - Seeker and counselor dashboards with request status handling
+- Counselor Disciples workspace listing only their own accepted/completed counseling relationships, with anonymous users kept pseudonymous
 - PostgreSQL-backed conversation history with participant-only access and anonymous-safe sender labels
 - Sender-only message editing, per-participant hiding, sender-authorized global deletion, and persisted read receipts
 - Engagement-scoped messaging API and participant-authorized chat history
 - Quick Exit to a neutral screen and safeguarding concern submission
-- Guidance route shows an explicit empty state; resource publishing is not connected
-- Canonical six-stage discipleship journey
+- Guidance route shows an explicit empty state until resources are published; counselors can prepare HTTPS resources for an assigned open conversation and send them through participant-only messaging
+- User-owned six-stage discipleship journey with saved in-progress and completed steps, progress summaries, and dashboard shortcuts
 - Administration and aggregate-reporting interfaces with privacy boundaries
+- SuperAdmin analytics with 7/30/90-day filters, periodic activity trends, request/category summaries, journey-stage totals, five-person cohort suppression, and 30-second refresh
 - Express authentication with Argon2id credentials and database-backed HttpOnly sessions
 - PostgreSQL migrations, role authorization, application audit history, and role-aware in-app notifications for counselor applications, request updates, and new messages
 - Account settings for editing a display name, optional short profile bio, and optional private profile picture
+- Optional private age-range and male/female gender fields on registration and account settings; demographics are never exposed in counselor or public profile responses and are not used for matching
+- Stable support-category IDs connect user needs, counselor application specialties, approved counselor matches, and counseling requests; "Other" requires a preferred category or an explicit all-counselors browse choice
+- Approved counselors are discoverable with their permitted profile details and optional profile picture; registered users' permitted names and pictures are visible only to their assigned conversation partner, while anonymous users remain pseudonymous and use the private-mode avatar
 - Responsive mobile, tablet, and desktop layouts; focus states and reduced-motion support
 
 Demo logins, role simulation, and fabricated dashboard records are not included in the application.
@@ -82,7 +87,7 @@ Run `pnpm api` and `pnpm dev` in separate terminals for local development. The d
 
 ## Counselor registration and API
 
-The registration form exposes exactly three public account types: Regular User, Anonymous User, and Counselor. New counselor registrations require a valid email, password, full name, counseling specialization, and acceptance of counselor conduct, confidentiality, and safeguarding requirements. A signed-in regular user can instead apply from Account settings using the existing account, email, and password; the application keeps counselor access disabled until SuperAdmin approval. Biography, preferred display name, location, professional title, experience, qualifications, license details, expertise lists, languages, work history, references, and supporting documents are optional and can be added after approval.
+The registration form exposes exactly three public account types: Regular User, Anonymous User, and Counselor. Age range and gender are optional for registered users and counselor applicants; anonymous registration does not collect these demographics. New counselor registrations require a valid email, password, full name, at least one configured support category, and acceptance of counselor conduct, confidentiality, and safeguarding requirements. Selected categories remain pending until a SuperAdmin approves the application. A signed-in regular user can instead apply from Account settings using the existing account, email, and password; the application keeps counselor access disabled until SuperAdmin approval. Biography, preferred display name, location, professional title, experience, qualifications, license details, expertise lists, languages, work history, references, and supporting documents are optional and can be added after approval.
 
 A counselor application starts as `PENDING_APPROVAL`; a SuperAdmin can approve an active applicant directly from the application summary, or request information / reject with a reason. Approval grants platform counselor access but does not represent professional credential or license verification. Optional credentials can be reviewed and verified separately, including after platform approval. Account suspension is stored separately from application status.
 
@@ -98,8 +103,16 @@ A counselor application starts as `PENDING_APPROVAL`; a SuperAdmin can approve a
 | GET | `/api/admin/counselor-applications` | SuperAdmin |
 | GET | `/api/admin/counselor-applications/:ref` | SuperAdmin |
 | PATCH | `/api/admin/counselor-applications/:ref/review` | SuperAdmin; rejection / information-request reason required |
+| PATCH | `/api/admin/users/:publicId/specialties` | SuperAdmin; set approved matching categories for an active approved counselor |
+| DELETE | `/api/admin/users/:publicId` | SuperAdmin; irreversibly anonymizes and deactivates a non-SuperAdmin account while retaining linked historical records |
 | PATCH | `/api/admin/counselor-applications/:ref/qualifications/:id/verification` | SuperAdmin |
 | PATCH | `/api/admin/counselor-applications/:ref/license-verification` | SuperAdmin |
+| GET | `/api/admin/analytics?days=7` (also 30 or 90) | SuperAdmin; aggregate-only analytics with small-cohort suppression |
+| GET | `/api/counselor/disciples` | Assigned counselor; own accepted and completed counseling relationships |
+| GET | `/api/counselors/:publicId/picture` | Public; active, approved counselors only |
+| GET | `/api/support-categories` | Public active support-category list |
+| GET | `/api/counselors/matches?categoryId=:id` | Public active and approved counselors with the approved specialty and its stable ID |
+| GET | `/api/counselors/matches?all=true` | Explicit browse of all active, approved counselors; request flow requires choosing one of that counselor's approved categories |
 | GET | `/api/counselor/applications/:ref/documents/:id` | Applicant or SuperAdmin; private download |
 | GET | `/api/notifications` | Own notifications |
 | PATCH | `/api/notifications/:id/read` | Own notification |
@@ -108,21 +121,26 @@ A counselor application starts as `PENDING_APPROVAL`; a SuperAdmin can approve a
 | GET | `/api/admin/site-settings` | SuperAdmin |
 | POST | `/api/admin/site-settings/homepage-image` | SuperAdmin; JPEG, PNG, or WebP up to 5 MB |
 | DELETE | `/api/admin/site-settings/homepage-image` | SuperAdmin |
-| GET | `/api/me/profile` | Own display name and bio |
-| PATCH | `/api/me` | Own display name and optional bio (up to 1,000 characters) |
+| GET | `/api/me/profile` | Own profile, including private demographics |
+| PATCH | `/api/me` | Own display name, bio, and private age/gender settings |
 | PATCH | `/api/me/password` | Own account; current password required |
 | GET | `/api/conversations/:publicId/messages` | Assigned conversation participant |
+| GET | `/api/conversations/:publicId/other-party-picture` | Assigned participant; anonymous users' pictures are never served |
 | POST | `/api/conversations/:publicId/receipts` | Assigned recipient; acknowledges message IDs as delivered or read |
 | PATCH | `/api/messages/:id` | Original sender; edit text |
 | DELETE | `/api/messages/:id` | Participant; `{ "scope": "for_me" }` or original sender with `{ "scope": "for_everyone" }` |
 
 Message editing and deletion have no time-window restriction. “Delete for me” stores a participant-specific hide record. “Delete for everyone” replaces the stored body with a neutral deletion notice; the original text is not copied to the audit log. Read receipts are recorded when the authenticated recipient opens the conversation. Delivery means the recipient account fetched the message history and acknowledged the message IDs; it does not prove device-level or push-notification delivery.
 
-Conversation updates use authenticated polling while the chat is open (every five seconds); there is no WebSocket transport. This provides eventual updates while connected rather than push-based real-time delivery.
+Approved, active counselor profiles are listed automatically; no separate publishing or visibility toggle is required. Their public directory exposes only the existing public counselor details and an optional picture. Registered user profile names and pictures are available only to the other participant in an assigned conversation. Anonymous users' pictures and identity details are not exposed to counselors or other users. Existing profiles follow these same rules automatically; no data migration is needed.
+
+SuperAdmins can anonymize and deactivate accounts from **Administration → Manage users**. This revokes sessions, removes sign-in credentials and account profile contact details, and removes the profile picture. Counseling, counselor profile/application details, application documents, conversations, messages, and audit records remain linked to the deactivated account for service and compliance history; counselor application details and documents may contain identifying information. SuperAdmin accounts are protected, anonymized accounts cannot be reactivated, and the operation cannot be undone.
+
+Conversation updates use authenticated polling while the chat is open (every five seconds); the counselor disciples list and admin analytics refresh every 30 seconds. There is no WebSocket transport, so these views provide periodic live refresh rather than push-based real-time delivery.
 
 ## Persistence and migrations
 
-Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. Migration `003_site_settings.sql` adds a singleton setting for the public homepage image and its accessible description; migration `004_optional_counselor_information.sql` makes nonessential counselor-profile and professional details nullable and removes the license-authority dependency while preserving existing records and uploaded documents. Migration `006_user_notification_kinds.sql` enables notification events for counseling requests and messages; migration `007_user_profile_bio.sql` adds the optional short bio to user profiles; migration `008_user_profile_pictures.sql` adds nullable storage-key and MIME metadata for profile pictures without changing existing accounts. Migration `009_message_controls_and_receipts.sql` adds message edit/deletion/receipt timestamps and participant-specific message hiding without removing existing messages. Profile pictures use opaque names in the private document directory, accept signature-validated JPEG, PNG, and WebP images up to 5 MB, and are available only through authenticated owner-scoped endpoints. Homepage image bytes are stored in PostgreSQL, so they persist across API restarts. Homepage image uploads are restricted to SuperAdmins and validated by file signature and a 5 MB size limit. The homepage image is publicly readable and versioned for cache invalidation. No migration constraint requires supporting-document records.
+Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. Migration `003_site_settings.sql` adds a singleton setting for the public homepage image and its accessible description; migration `004_optional_counselor_information.sql` makes nonessential counselor-profile and professional details nullable and removes the license-authority dependency while preserving existing records and uploaded documents. Migration `006_user_notification_kinds.sql` enables notification events for counseling requests and messages; migration `007_user_profile_bio.sql` adds the optional short bio to user profiles; migration `008_user_profile_pictures.sql` adds nullable storage-key and MIME metadata for profile pictures without changing existing accounts. Migration `009_message_controls_and_receipts.sql` adds message edit/deletion/receipt timestamps and participant-specific message hiding without removing existing messages. Migration `010_user_anonymization_marker.sql` adds an account-anonymization timestamp without modifying existing user records. Migration `011_demographics_and_counselor_categories.sql` adds nullable private demographics, stable support categories, normalized approved counselor-specialty links (backfilled only for existing specialties that match configured category labels/aliases), and an optional category reference on counseling requests. Migration `012_gender_options_male_female.sql` restricts newly stored gender values to `male` or `female` (or null). Profile pictures use opaque names in the private document directory, accept signature-validated JPEG, PNG, and WebP images up to 5 MB, and are served to account owners, to assigned conversation counterparts when the account is registered, or publicly for active approved counselors only. Anonymous users' pictures are never exposed to conversation partners. Homepage image bytes are stored in PostgreSQL, so they persist across API restarts. Homepage image uploads are restricted to SuperAdmins and validated by file signature and a 5 MB size limit. The homepage image is publicly readable and versioned for cache invalidation. No migration constraint requires supporting-document records.
 
 Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names; original names and storage paths are never exposed as public URLs. Production deployments should use a private persistent volume with encryption at rest, restricted service access, backups, and a tested retention/deletion policy. The authenticated API streams file contents only to the applicant or a SuperAdmin reviewer.
 
@@ -143,7 +161,7 @@ Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names
 ## Verification completed
 
 - `pnpm build` completes the Vue TypeScript check and production Vite build.
-- `pnpm test` passes: 26 tests across 2 test files, including participant-scoped conversation-history access, anonymous-safe sender labels, and private profile-picture registration/upload/replacement/removal, validation, and access control.
+- `pnpm test` passes: 33 tests across 2 test files, including participant-scoped conversation-history access, anonymous-safe sender labels, private demographic creation/updates, category-based counselor matching and administration, category-preserving requests, and profile-picture registration/upload/replacement/removal, validation, visibility, and access control.
 - All eight PostgreSQL migrations were applied successfully to the configured Supabase PostgreSQL 17.11 database. A repeat migration run completed without reapplying them.
 - Live schema verification confirmed 20 public tables and all eight migration ledger entries.
 - The Express `/health` route and public counselor API succeeded against the live database; unauthenticated `/api/me` returned 401 as expected.

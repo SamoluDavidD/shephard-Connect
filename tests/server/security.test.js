@@ -1,4 +1,4 @@
-import { access, mkdtemp, rm } from "node:fs/promises"
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import argon2 from "argon2"
@@ -30,10 +30,28 @@ class FakePool {
   lastQuery = ""
   application = null
   counselorProfile = null
+  counselorDirectory = []
+  publicCounselorPicture = null
+  supportCategories = [
+    { id: "prayer-spiritual-growth", label: "Prayer & spiritual growth" },
+    { id: "relationships-marriage", label: "Relationships / marriage" },
+    { id: "bible-questions", label: "Bible questions" },
+    { id: "school-career", label: "School / career" },
+    { id: "personal-growth", label: "Personal growth" },
+  ]
   qualifications = []
   documents = []
   reviews = []
   notifications = []
+  counselingRequests = []
+  journeyProgress = []
+  auditLogs = []
+  disciples = []
+  analyticsMetrics = {}
+  analyticsTrends = []
+  analyticsStatuses = []
+  analyticsCategories = []
+  analyticsJourney = []
   userProfile = { display_name: null, bio: "" }
   userProfiles = new Map()
   siteSettings = {
@@ -50,28 +68,146 @@ class FakePool {
   async query(sql, params = []) {
     const queryText = sql.replace(/\s+/g, " ").trim()
     this.lastQuery = queryText
-
-    if (queryText === "SELECT 1") return { rows: [{ "?column?": 1 }], rowCount: 1 }
-    if (queryText.startsWith("SELECT homepage_image_alt, homepage_image_updated_at")) {
+    if (queryText === "SELECT 1")
+      return { rows: [{ "?column?": 1 }], rowCount: 1 }
+    if (queryText.startsWith("SELECT seeker.public_id AS seeker_public_id")) {
+      return { rows: this.disciples, rowCount: this.disciples.length }
+    }
+    if (queryText.startsWith("SELECT (SELECT count(*) FROM users) AS total_accounts")) {
+      return { rows: [this.analyticsMetrics], rowCount: 1 }
+    }
+    if (queryText.startsWith("WITH buckets AS (")) {
+      return { rows: this.analyticsTrends, rowCount: this.analyticsTrends.length }
+    }
+    if (queryText.startsWith("SELECT status, count(*) AS total FROM counseling_requests")) {
+      return { rows: this.analyticsStatuses, rowCount: this.analyticsStatuses.length }
+    }
+    if (queryText.startsWith("SELECT COALESCE(category.label, 'Uncategorized') AS label")) {
+      return { rows: this.analyticsCategories, rowCount: this.analyticsCategories.length }
+    }
+    if (queryText.startsWith("SELECT stage, status, count(*) AS total FROM discipleship_progress")) {
+      return { rows: this.analyticsJourney, rowCount: this.analyticsJourney.length }
+    }
+    if (
+      queryText.startsWith(
+        "INSERT INTO discipleship_progress (user_id, stage) SELECT",
+      )
+    ) {
+      this.journeyProgress = params[1].map((stage) => ({
+        user_id: params[0],
+        stage,
+        status: "not_started",
+        updated_at: new Date().toISOString(),
+        completed_at: null,
+      }))
+      return { rows: [], rowCount: this.journeyProgress.length }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT stage, status, updated_at, completed_at FROM discipleship_progress",
+      )
+    ) {
       return {
-        rows: [{
-          homepage_image_alt: this.siteSettings.homepage_image_alt,
-          homepage_image_updated_at: this.siteSettings.homepage_image_updated_at,
-        }],
+        rows: this.journeyProgress
+          .filter((item) => item.user_id === params[0])
+          .sort(
+            (first, second) =>
+              params[1].indexOf(first.stage) - params[1].indexOf(second.stage),
+          ),
+        rowCount: this.journeyProgress.length,
+      }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT stage, status FROM discipleship_progress WHERE user_id = $1",
+      )
+    ) {
+      return {
+        rows: this.journeyProgress
+          .filter((item) => item.user_id === params[0])
+          .map(({ stage, status }) => ({ stage, status })),
+        rowCount: this.journeyProgress.length,
+      }
+    }
+    if (queryText.startsWith("UPDATE discipleship_progress SET status = 'not_started'")) {
+      const stageOrder = params[1]
+      for (const item of this.journeyProgress) {
+        if (
+          item.user_id === params[0] &&
+          stageOrder.indexOf(item.stage) + 1 > params[2]
+        ) {
+          item.status = "not_started"
+          item.completed_at = null
+        }
+      }
+      return { rows: [], rowCount: this.journeyProgress.length }
+    }
+    if (
+      queryText.startsWith(
+        "INSERT INTO discipleship_progress (user_id, stage, status, completed_at)",
+      )
+    ) {
+      const progress = this.journeyProgress.find(
+        (item) => item.user_id === params[0] && item.stage === params[1],
+      )
+      const updated = {
+        user_id: params[0],
+        stage: params[1],
+        status: params[2],
+        updated_at: new Date().toISOString(),
+        completed_at:
+          params[2] === "completed" ? new Date().toISOString() : null,
+      }
+      if (progress) Object.assign(progress, updated)
+      else this.journeyProgress.push(updated)
+      return { rows: [{ ...updated }], rowCount: 1 }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT homepage_image_alt, homepage_image_updated_at",
+      )
+    ) {
+      return {
+        rows: [
+          {
+            homepage_image_alt: this.siteSettings.homepage_image_alt,
+            homepage_image_updated_at:
+              this.siteSettings.homepage_image_updated_at,
+          },
+        ],
         rowCount: 1,
       }
     }
-    if (queryText.startsWith("SELECT homepage_image_updated_at FROM site_settings")) {
-      return { rows: [{ homepage_image_updated_at: this.siteSettings.homepage_image_updated_at }], rowCount: 1 }
-    }
-    if (queryText.startsWith("SELECT homepage_image IS NOT NULL AS has_homepage_image")) {
+    if (
+      queryText.startsWith(
+        "SELECT homepage_image_updated_at FROM site_settings",
+      )
+    ) {
       return {
-        rows: [{
-          has_homepage_image: Boolean(this.siteSettings.homepage_image),
-          homepage_image_alt: this.siteSettings.homepage_image_alt,
-          homepage_image_type: this.siteSettings.homepage_image_type,
-          homepage_image_updated_at: this.siteSettings.homepage_image_updated_at,
-        }],
+        rows: [
+          {
+            homepage_image_updated_at:
+              this.siteSettings.homepage_image_updated_at,
+          },
+        ],
+        rowCount: 1,
+      }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT homepage_image IS NOT NULL AS has_homepage_image",
+      )
+    ) {
+      return {
+        rows: [
+          {
+            has_homepage_image: Boolean(this.siteSettings.homepage_image),
+            homepage_image_alt: this.siteSettings.homepage_image_alt,
+            homepage_image_type: this.siteSettings.homepage_image_type,
+            homepage_image_updated_at:
+              this.siteSettings.homepage_image_updated_at,
+          },
+        ],
         rowCount: 1,
       }
     }
@@ -84,14 +220,19 @@ class FakePool {
       this.siteSettings.homepage_image_type = params[2]
       this.siteSettings.homepage_image_updated_at = new Date().toISOString()
       return {
-        rows: [{
-          homepage_image_type: this.siteSettings.homepage_image_type,
-          homepage_image_updated_at: this.siteSettings.homepage_image_updated_at,
-        }],
+        rows: [
+          {
+            homepage_image_type: this.siteSettings.homepage_image_type,
+            homepage_image_updated_at:
+              this.siteSettings.homepage_image_updated_at,
+          },
+        ],
         rowCount: 1,
       }
     }
-    if (queryText.startsWith("UPDATE site_settings SET homepage_image = NULL")) {
+    if (
+      queryText.startsWith("UPDATE site_settings SET homepage_image = NULL")
+    ) {
       this.siteSettings = {
         homepage_image: null,
         homepage_image_alt: null,
@@ -126,6 +267,9 @@ class FakePool {
       this.userProfile = {
         user_id: params[0],
         display_name: params[1],
+        age_range: params[2] || null,
+        gender: params[3] || null,
+        gender_description: params[4] || null,
         bio: "",
         picture_storage_key: null,
         picture_mime_type: null,
@@ -134,19 +278,159 @@ class FakePool {
       this.userProfiles.set(params[0], this.userProfile)
       return { rows: [], rowCount: 1 }
     }
-    if (queryText.startsWith("SELECT display_name, bio, picture_storage_key, updated_at FROM user_profiles")) {
+    if (
+      queryText.startsWith(
+        "SELECT display_name, bio, age_range, gender, picture_storage_key",
+      )
+    ) {
       const profile = this.userProfiles.get(params[0])
-      return { rows: profile ? [{ ...profile }] : [], rowCount: profile ? 1 : 0 }
+      return {
+        rows: profile ? [{ ...profile }] : [],
+        rowCount: profile ? 1 : 0,
+      }
     }
-    if (queryText.startsWith("SELECT picture_storage_key, picture_mime_type FROM user_profiles")) {
+    if (queryText.startsWith("SELECT id, label FROM support_categories")) {
+      return {
+        rows: this.supportCategories,
+        rowCount: this.supportCategories.length,
+      }
+    }
+    if (
+      queryText.startsWith("SELECT id FROM support_categories WHERE id = ANY")
+    ) {
+      const rows = this.supportCategories.filter((category) =>
+        params[0].includes(category.id),
+      )
+      return { rows, rowCount: rows.length }
+    }
+    if (
+      queryText.startsWith("SELECT u.id FROM users u") &&
+      queryText.includes("JOIN counselor_profiles c")
+    ) {
+      const user = [...this.users.values()].find(
+        (item) =>
+          item.public_id === String(params[0]).toUpperCase() &&
+          item.account_type === "counselor" &&
+          item.role === "counselor" &&
+          item.status === "active",
+      )
+      const profile =
+        user && this.counselorProfile?.user_id === user.id
+          ? this.counselorProfile
+          : null
+      return user && profile?.approved
+        ? { rows: [{ id: user.id }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
+    if (
+      queryText.startsWith("SELECT id FROM support_categories WHERE id = $1")
+    ) {
+      const category = this.supportCategories.find(
+        (item) => item.id === params[0],
+      )
+      return {
+        rows: category ? [{ id: category.id }] : [],
+        rowCount: category ? 1 : 0,
+      }
+    }
+    if (
+      queryText.startsWith("SELECT id FROM support_categories") &&
+      queryText.includes("ANY(aliases)")
+    ) {
+      const [id, need] = params
+      const category = this.supportCategories.find(
+        (item) => item.id === id && item.label === need,
+      )
+      return {
+        rows: category ? [{ id: category.id }] : [],
+        rowCount: category ? 1 : 0,
+      }
+    }
+    if (
+      queryText.startsWith("SELECT u.public_id, p.display_name, c.headline") &&
+      queryText.includes("counselor_specialties")
+    ) {
+      const categoryId = params[0]
+      const rows = this.counselorDirectory
+        .filter(
+          (item) =>
+            item.active !== false &&
+            item.approved !== false &&
+            (!categoryId || item.category_ids?.includes(categoryId)),
+        )
+        .map((item) => ({ ...item, specialties: item.specialties || [] }))
+      return { rows, rowCount: rows.length }
+    }
+    if (queryText.startsWith("SELECT c.user_id FROM counselor_profiles c")) {
+      const counselor = this.counselorDirectory.find(
+        (item) =>
+          item.public_id === String(params[0]).toUpperCase() &&
+          item.active !== false &&
+          item.approved !== false &&
+          item.category_ids?.includes(params[1]),
+      )
+      return {
+        rows: counselor
+          ? [{ user_id: counselor.user_id || counselor.public_id }]
+          : [],
+        rowCount: counselor ? 1 : 0,
+      }
+    }
+    if (queryText.startsWith("INSERT INTO counseling_requests")) {
+      const row = {
+        public_ref: params[0],
+        need: params[3],
+        support_category_id: params[4],
+        topic: params[5],
+        status: "Pending",
+        created_at: new Date().toISOString(),
+      }
+      this.counselingRequests.push(row)
+      return { rows: [row], rowCount: 1 }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT picture_storage_key, picture_mime_type FROM user_profiles",
+      )
+    ) {
       const profile = this.userProfiles.get(params[0])
-      return { rows: profile ? [{ ...profile }] : [], rowCount: profile ? 1 : 0 }
+      return {
+        rows: profile ? [{ ...profile }] : [],
+        rowCount: profile ? 1 : 0,
+      }
     }
     if (queryText.startsWith("SELECT picture_storage_key FROM user_profiles")) {
       const profile = this.userProfiles.get(params[0])
-      return { rows: profile ? [{ picture_storage_key: profile.picture_storage_key }] : [], rowCount: profile ? 1 : 0 }
+      return {
+        rows: profile
+          ? [{ picture_storage_key: profile.picture_storage_key }]
+          : [],
+        rowCount: profile ? 1 : 0,
+      }
     }
-    if (queryText.startsWith("UPDATE user_profiles SET picture_storage_key = $2")) {
+    if (
+      queryText.startsWith("SELECT u.public_id, p.display_name, c.headline")
+    ) {
+      return {
+        rows: this.counselorDirectory,
+        rowCount: this.counselorDirectory.length,
+      }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT p.picture_storage_key, p.picture_mime_type FROM users u",
+      )
+    ) {
+      const picture = this.publicCounselorPicture
+      return picture?.public_id === String(params[0]).toUpperCase() &&
+        picture.approved &&
+        picture.active
+        ? { rows: [picture], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
+    if (
+      queryText.startsWith("UPDATE user_profiles SET picture_storage_key = $2")
+    ) {
       const profile = this.userProfiles.get(params[0])
       if (profile) {
         profile.picture_storage_key = params[1]
@@ -156,7 +440,11 @@ class FakePool {
       }
       return { rows: [], rowCount: profile ? 1 : 0 }
     }
-    if (queryText.startsWith("UPDATE user_profiles SET picture_storage_key = NULL")) {
+    if (
+      queryText.startsWith(
+        "UPDATE user_profiles SET picture_storage_key = NULL",
+      )
+    ) {
       const profile = this.userProfiles.get(params[0])
       if (profile) {
         profile.picture_storage_key = null
@@ -166,11 +454,33 @@ class FakePool {
       }
       return { rows: [], rowCount: profile ? 1 : 0 }
     }
-    if (queryText.startsWith("UPDATE user_profiles SET display_name = $2, bio = COALESCE")) {
+    if (queryText.startsWith("UPDATE user_profiles SET display_name = NULL")) {
+      const profile = this.userProfiles.get(params[0])
+      if (!profile) return { rows: [], rowCount: 0 }
+      profile.display_name = null
+      profile.bio = ""
+      profile.age_range = null
+      profile.gender = null
+      profile.gender_description = null
+      profile.picture_storage_key = null
+      profile.picture_mime_type = null
+      profile.updated_at = new Date().toISOString()
+      const user = this.users.get(params[0])
+      if (user) user.display_name = null
+      return { rows: [], rowCount: 1 }
+    }
+    if (
+      queryText.startsWith(
+        "UPDATE user_profiles SET display_name = $2, bio = COALESCE",
+      )
+    ) {
       const profile = this.userProfiles.get(params[0])
       if (!profile) return { rows: [], rowCount: 0 }
       profile.display_name = params[1]
       if (params[2] !== null) profile.bio = params[2]
+      if (params[3]) profile.age_range = params[4]
+      if (params[5]) profile.gender = params[6]
+      if (params[7]) profile.gender_description = params[8]
       profile.updated_at = new Date().toISOString()
       this.userProfile = profile
       const user = this.users.get(params[0])
@@ -212,8 +522,28 @@ class FakePool {
       }
       return { rows: [], rowCount: 1 }
     }
-    if (queryText.startsWith("UPDATE counselor_applications SET professional_title")) {
-      if (this.application?.user_id !== params[0] || this.application.status !== "APPROVED") {
+    if (queryText.startsWith("INSERT INTO counselor_specialties")) {
+      this.counselorProfile = {
+        ...this.counselorProfile,
+        support_category_ids: params[1],
+      }
+      return { rows: [], rowCount: params[1]?.length || 0 }
+    }
+    if (queryText.startsWith("DELETE FROM counselor_specialties")) {
+      if (this.counselorProfile?.user_id === params[0]) {
+        this.counselorProfile.support_category_ids = []
+      }
+      return { rows: [], rowCount: 1 }
+    }
+    if (
+      queryText.startsWith(
+        "UPDATE counselor_applications SET professional_title",
+      )
+    ) {
+      if (
+        this.application?.user_id !== params[0] ||
+        this.application.status !== "APPROVED"
+      ) {
         return { rows: [], rowCount: 0 }
       }
       Object.assign(this.application, {
@@ -235,8 +565,12 @@ class FakePool {
       })
       return { rows: [{ id: this.application.id }], rowCount: 1 }
     }
-    if (queryText.startsWith("UPDATE counselor_qualifications SET qualification")) {
-      const qualification = this.qualifications.find((item) => item.application_id === params[0])
+    if (
+      queryText.startsWith("UPDATE counselor_qualifications SET qualification")
+    ) {
+      const qualification = this.qualifications.find(
+        (item) => item.application_id === params[0],
+      )
       if (!qualification) return { rows: [], rowCount: 0 }
       Object.assign(qualification, {
         qualification: params[1],
@@ -247,12 +581,17 @@ class FakePool {
       return { rows: [{ id: qualification.id }], rowCount: 1 }
     }
     if (queryText.startsWith("INSERT INTO counselor_applications")) {
-      const existingAccountApplication = params.length === 5
+      const existingAccountApplication = queryText.includes(
+        "NULL, NULL, NULL, NULL, $5",
+      )
       this.application = {
         id: "application-id",
         public_ref: params[0],
         user_id: params[1],
         status: "PENDING_APPROVAL",
+        support_category_ids: existingAccountApplication
+          ? params[5]
+          : params[26],
         full_legal_name: params[2],
         preferred_display_name: params[3],
         phone: existingAccountApplication ? null : params[4],
@@ -281,11 +620,13 @@ class FakePool {
         updated_at: new Date().toISOString(),
       }
       return {
-        rows: [{
-          id: this.application.id,
-          status: this.application.status,
-          submitted_at: this.application.submitted_at,
-        }],
+        rows: [
+          {
+            id: this.application.id,
+            status: this.application.status,
+            submitted_at: this.application.submitted_at,
+          },
+        ],
         rowCount: 1,
       }
     }
@@ -321,16 +662,18 @@ class FakePool {
       this.documents.push(document)
       return {
         rows: queryText.includes("RETURNING id")
-          ? [{
-              id: document.id,
-              category: document.category,
-              status: document.status,
-              original_name: document.original_name,
-              mime_type: document.mime_type,
-              byte_size: document.byte_size,
-              uploaded_at: document.uploaded_at,
-              requested_at: document.requested_at,
-            }]
+          ? [
+              {
+                id: document.id,
+                category: document.category,
+                status: document.status,
+                original_name: document.original_name,
+                mime_type: document.mime_type,
+                byte_size: document.byte_size,
+                uploaded_at: document.uploaded_at,
+                requested_at: document.requested_at,
+              },
+            ]
           : [],
         rowCount: 1,
       }
@@ -341,13 +684,19 @@ class FakePool {
         ? { rows: [this.application], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("SELECT id FROM counselor_applications WHERE user_id = $1")) {
+    if (
+      queryText.startsWith(
+        "SELECT id FROM counselor_applications WHERE user_id = $1",
+      )
+    ) {
       return this.application?.user_id === params[0]
         ? { rows: [{ id: this.application.id }], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("SELECT id FROM counselor_documents") &&
-      queryText.includes("status = 'requested'")) {
+    if (
+      queryText.startsWith("SELECT id FROM counselor_documents") &&
+      queryText.includes("status = 'requested'")
+    ) {
       const offset = params[2]
       const requested = this.documents.filter(
         (item) =>
@@ -359,7 +708,9 @@ class FakePool {
         ? { rows: [{ id: requested[offset].id }], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("UPDATE counselor_documents SET status = 'uploaded'")) {
+    if (
+      queryText.startsWith("UPDATE counselor_documents SET status = 'uploaded'")
+    ) {
       const document = this.documents.find((item) => item.id === params[0])
       if (!document) return { rows: [], rowCount: 0 }
       Object.assign(document, {
@@ -379,7 +730,11 @@ class FakePool {
     if (queryText.startsWith("INSERT INTO counselor_application_responses")) {
       return { rows: [{ created_at: new Date().toISOString() }], rowCount: 1 }
     }
-    if (queryText.startsWith("SELECT d.id, d.category, d.storage_key, d.original_name, d.mime_type")) {
+    if (
+      queryText.startsWith(
+        "SELECT d.id, d.category, d.storage_key, d.original_name, d.mime_type",
+      )
+    ) {
       const document = this.documents.find(
         (item) =>
           item.id === params[1] &&
@@ -387,42 +742,73 @@ class FakePool {
       )
       return document
         ? {
-            rows: [{
-              ...document,
-              applicant_id: this.application.user_id,
-            }],
+            rows: [
+              {
+                ...document,
+                applicant_id: this.application.user_id,
+              },
+            ],
             rowCount: 1,
           }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("SELECT public_ref, status, submitted_at, updated_at FROM counselor_applications")) {
+    if (
+      queryText.startsWith(
+        "SELECT public_ref, status, submitted_at, updated_at FROM counselor_applications",
+      )
+    ) {
       return this.application?.user_id === params[0]
         ? { rows: [this.application], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("SELECT a.*, u.id AS applicant_id, u.status AS account_status")) {
+    if (
+      queryText.startsWith(
+        "SELECT a.*, u.id AS applicant_id, u.status AS account_status",
+      )
+    ) {
       return this.application?.public_ref === String(params[0]).toUpperCase()
         ? { rows: [this.application], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("SELECT q.id, q.application_id, a.public_ref, a.qualification_verified")) {
+    if (
+      queryText.startsWith(
+        "SELECT q.id, q.application_id, a.public_ref, a.qualification_verified",
+      )
+    ) {
       const qualification = this.qualifications.find(
-        (item) => item.id === params[0] && this.application?.public_ref === String(params[1]).toUpperCase(),
+        (item) =>
+          item.id === params[0] &&
+          this.application?.public_ref === String(params[1]).toUpperCase(),
       )
       return qualification
-        ? { rows: [{
-            ...qualification,
-            public_ref: this.application.public_ref,
-            qualification_verified: this.application.qualification_verified,
-          }], rowCount: 1 }
+        ? {
+            rows: [
+              {
+                ...qualification,
+                public_ref: this.application.public_ref,
+                qualification_verified: this.application.qualification_verified,
+              },
+            ],
+            rowCount: 1,
+          }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("UPDATE counselor_qualifications SET verification_status")) {
-      const qualification = this.qualifications.find((item) => item.id === params[0])
+    if (
+      queryText.startsWith(
+        "UPDATE counselor_qualifications SET verification_status",
+      )
+    ) {
+      const qualification = this.qualifications.find(
+        (item) => item.id === params[0],
+      )
       if (qualification) qualification.verification_status = params[1]
       return { rows: [], rowCount: qualification ? 1 : 0 }
     }
-    if (queryText.startsWith("UPDATE counselor_applications SET qualification_verified")) {
+    if (
+      queryText.startsWith(
+        "UPDATE counselor_applications SET qualification_verified",
+      )
+    ) {
       if (this.application?.id === params[0]) {
         this.application.qualification_verified = params[1]
         return { rows: [], rowCount: 1 }
@@ -442,46 +828,63 @@ class FakePool {
       return { rows: [], rowCount: user ? 1 : 0 }
     }
     if (queryText.startsWith("SELECT a.id FROM counselor_applications a")) {
-      return this.application?.user_id === params[0] && this.application.status === "APPROVED"
+      return this.application?.user_id === params[0] &&
+        this.application.status === "APPROVED"
         ? { rows: [{ id: this.application.id }], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("SELECT p.display_name, c.headline, c.bio, c.areas, c.languages")) {
-      if (!this.application || this.application.user_id !== params[0] || this.application.status !== "APPROVED") {
+    if (
+      queryText.startsWith(
+        "SELECT p.display_name, c.headline, c.bio, c.areas, c.languages",
+      )
+    ) {
+      if (
+        !this.application ||
+        this.application.user_id !== params[0] ||
+        this.application.status !== "APPROVED"
+      ) {
         return { rows: [], rowCount: 0 }
       }
       return {
-        rows: [{
-          ...(this.counselorProfile || {}),
-          display_name: this.users.get(params[0])?.display_name,
-          public_ref: this.application.public_ref,
-          application_id: this.application.id,
-          professional_title: this.application.professional_title,
-          highest_qualification: this.application.highest_qualification,
-          institution: this.application.institution,
-          qualification_type: this.application.qualification_type,
-          completion_year: this.application.completion_year,
-          certifications: this.application.certifications,
-          years_experience: this.application.years_experience,
-          license_number: this.application.license_number,
-          licensing_authority: this.application.licensing_authority,
-          license_expiry: this.application.license_expiry,
-          work_history: this.application.work_history,
-          references_text: this.application.references_text,
-          qualification_verified: this.application.qualification_verified,
-          license_verified: this.application.license_verified,
-        }],
+        rows: [
+          {
+            ...(this.counselorProfile || {}),
+            display_name: this.users.get(params[0])?.display_name,
+            public_ref: this.application.public_ref,
+            application_id: this.application.id,
+            professional_title: this.application.professional_title,
+            highest_qualification: this.application.highest_qualification,
+            institution: this.application.institution,
+            qualification_type: this.application.qualification_type,
+            completion_year: this.application.completion_year,
+            certifications: this.application.certifications,
+            years_experience: this.application.years_experience,
+            license_number: this.application.license_number,
+            licensing_authority: this.application.licensing_authority,
+            license_expiry: this.application.license_expiry,
+            work_history: this.application.work_history,
+            references_text: this.application.references_text,
+            qualification_verified: this.application.qualification_verified,
+            license_verified: this.application.license_verified,
+          },
+        ],
         rowCount: 1,
       }
     }
-    if (queryText.startsWith("SELECT id, category, status, original_name, mime_type, byte_size, uploaded_at, requested_at") &&
-      queryText.includes("FROM counselor_documents WHERE application_id")) {
+    if (
+      queryText.startsWith(
+        "SELECT id, category, status, original_name, mime_type, byte_size, uploaded_at, requested_at",
+      ) &&
+      queryText.includes("FROM counselor_documents WHERE application_id")
+    ) {
       return {
-        rows: this.documents.filter((item) => item.application_id === params[0]),
+        rows: this.documents.filter(
+          (item) => item.application_id === params[0],
+        ),
         rowCount: this.documents.length,
       }
     }
-    if (queryText.startsWith("SELECT id, role, account_type FROM users WHERE public_id")) {
+    if (queryText.startsWith("SELECT id, role, account_type")) {
       const user = [...this.users.values()].find(
         (item) => item.public_id === String(params[0]).toUpperCase(),
       )
@@ -492,15 +895,63 @@ class FakePool {
       if (user) user.role = params[1]
       return { rows: [], rowCount: user ? 1 : 0 }
     }
+    if (
+      queryText.startsWith(
+        "SELECT id, public_id, role, status, anonymized_at FROM users",
+      )
+    ) {
+      const user = [...this.users.values()].find(
+        (item) => item.public_id === String(params[0]).toUpperCase(),
+      )
+      return user ? { rows: [user], rowCount: 1 } : { rows: [], rowCount: 0 }
+    }
+    if (
+      queryText.startsWith(
+        "UPDATE users SET status = 'deactivated', anonymized_at",
+      )
+    ) {
+      const user = this.users.get(params[0])
+      if (!user) return { rows: [], rowCount: 0 }
+      user.status = "deactivated"
+      user.anonymized_at = new Date().toISOString()
+      return { rows: [], rowCount: 1 }
+    }
+    if (queryText.startsWith("UPDATE user_credentials SET email = NULL")) {
+      const user = this.users.get(params[0])
+      if (!user) return { rows: [], rowCount: 0 }
+      user.email = null
+      user.email_normalized = null
+      user.password_hash = params[1]
+      user.recovery_code_hash = params[2]
+      return { rows: [], rowCount: 1 }
+    }
     if (queryText.startsWith("UPDATE users SET status = $2")) {
       const user = [...this.users.values()].find(
         (item) => item.public_id === String(params[0]).toUpperCase(),
       )
+      if (user?.anonymized_at && params[1] === "active") {
+        return { rows: [], rowCount: 0 }
+      }
       if (user) {
         user.status = params[1]
-        return { rows: [{ id: user.id, public_id: user.public_id, status: user.status }], rowCount: 1 }
+        return {
+          rows: [
+            { id: user.id, public_id: user.public_id, status: user.status },
+          ],
+          rowCount: 1,
+        }
       }
       return { rows: [], rowCount: 0 }
+    }
+    if (queryText.startsWith("SELECT 1 FROM users WHERE public_id")) {
+      const user = [...this.users.values()].find(
+        (item) =>
+          item.public_id === String(params[0]).toUpperCase() &&
+          item.anonymized_at,
+      )
+      return user
+        ? { rows: [{ "?column?": 1 }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
     }
     if (queryText.startsWith("INSERT INTO counselor_reviews")) {
       this.reviews.push({
@@ -508,17 +959,28 @@ class FakePool {
         reviewer_id: params[1],
         action: params[2],
         reason: params[3],
-        requested_document_categories: Array.isArray(params[4]) ? params[4] : [],
+        requested_document_categories: Array.isArray(params[4])
+          ? params[4]
+          : [],
         created_at: new Date().toISOString(),
       })
       return { rows: [], rowCount: 1 }
     }
-    if (queryText.includes("FROM counselor_documents WHERE application_id = (") &&
-      queryText.includes("counselor_applications WHERE user_id")) {
-      return { rows: this.documents.filter((item) => item.application_id === this.application?.id), rowCount: this.documents.length }
+    if (
+      queryText.includes("FROM counselor_documents WHERE application_id = (") &&
+      queryText.includes("counselor_applications WHERE user_id")
+    ) {
+      return {
+        rows: this.documents.filter(
+          (item) => item.application_id === this.application?.id,
+        ),
+        rowCount: this.documents.length,
+      }
     }
-    if (queryText.includes("FROM counselor_reviews") &&
-      queryText.includes("action = 'REQUESTED_MORE_INFORMATION'")) {
+    if (
+      queryText.includes("FROM counselor_reviews") &&
+      queryText.includes("action = 'REQUESTED_MORE_INFORMATION'")
+    ) {
       const requested = this.reviews
         .filter((review) => review.action === "REQUESTED_MORE_INFORMATION")
         .map((review) => ({
@@ -540,8 +1002,14 @@ class FakePool {
       })
       return { rows: [], rowCount: 1 }
     }
-    if (queryText.startsWith("SELECT id, kind, title, message, created_at, read_at FROM user_notifications")) {
-      const rows = this.notifications.filter((item) => item.user_id === params[0])
+    if (
+      queryText.startsWith(
+        "SELECT id, kind, title, message, created_at, read_at FROM user_notifications",
+      )
+    ) {
+      const rows = this.notifications.filter(
+        (item) => item.user_id === params[0],
+      )
       return { rows, rowCount: rows.length }
     }
     if (queryText.startsWith("UPDATE user_notifications SET read_at")) {
@@ -549,7 +1017,10 @@ class FakePool {
         (item) => item.id === params[0] && item.user_id === params[1],
       )
       if (notification) notification.read_at = new Date().toISOString()
-      return { rows: notification ? [{ id: notification.id }] : [], rowCount: notification ? 1 : 0 }
+      return {
+        rows: notification ? [{ id: notification.id }] : [],
+        rowCount: notification ? 1 : 0,
+      }
     }
     if (queryText.startsWith("INSERT INTO sessions")) {
       this.sessions.set(Buffer.from(params[1]).toString("hex"), {
@@ -570,6 +1041,16 @@ class FakePool {
       return { rows: [], rowCount: 1 }
     }
     if (queryText.startsWith("UPDATE sessions SET revoked_at")) {
+      if (queryText.includes("WHERE user_id = $1 AND revoked_at IS NULL")) {
+        let revoked = 0
+        for (const session of this.sessions.values()) {
+          if (session.user?.id === params[0]) {
+            session.revoked = true
+            revoked += 1
+          }
+        }
+        return { rows: [], rowCount: revoked }
+      }
       if (queryText.includes("token_hash <> $2")) {
         const currentToken = Buffer.from(params[1]).toString("hex")
         for (const [key, session] of this.sessions) {
@@ -585,18 +1066,28 @@ class FakePool {
         ? { rows: [{ password_hash: this.user.password_hash }], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("UPDATE user_credentials SET password_hash = $2, updated_at")) {
+    if (
+      queryText.startsWith(
+        "UPDATE user_credentials SET password_hash = $2, updated_at",
+      )
+    ) {
       if (this.user) this.user.password_hash = params[1]
       return { rows: [], rowCount: this.user ? 1 : 0 }
     }
-    if (queryText.includes("c.email_normalized = $1 OR u.public_id = upper($1)")) {
+    if (
+      queryText.includes("c.email_normalized = $1 OR u.public_id = upper($1)")
+    ) {
       const login = String(params[0]).toLowerCase()
       return this.user &&
-        (this.user.email_normalized === login || this.user.public_id.toLowerCase() === login)
+        (this.user.email_normalized === login ||
+          this.user.public_id.toLowerCase() === login)
         ? { rows: [this.user], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.includes("WHERE u.public_id = upper($1)") && queryText.includes("FOR UPDATE")) {
+    if (
+      queryText.includes("WHERE u.public_id = upper($1)") &&
+      queryText.includes("FOR UPDATE")
+    ) {
       return this.user?.public_id === String(params[0]).toUpperCase()
         ? { rows: [this.user], rowCount: 1 }
         : { rows: [], rowCount: 0 }
@@ -607,6 +1098,13 @@ class FakePool {
       return { rows: [], rowCount: 1 }
     }
     if (queryText.startsWith("INSERT INTO audit_logs")) {
+      this.auditLogs.push({
+        actor_id: params[0],
+        action: params[1],
+        target_type: params[2],
+        target_id: params[3],
+        metadata: params[4],
+      })
       return { rows: [], rowCount: 1 }
     }
     if (queryText.startsWith("SELECT * FROM counseling_conversations")) {
@@ -614,14 +1112,45 @@ class FakePool {
         ? { rows: [this.conversation], rowCount: 1 }
         : { rows: [], rowCount: 0 }
     }
+    if (
+      queryText.startsWith(
+        "SELECT c.seeker_id, c.counselor_id FROM counseling_conversations",
+      )
+    ) {
+      return this.conversation?.public_id === String(params[0]).toUpperCase()
+        ? { rows: [this.conversation], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    }
+    if (
+      queryText.startsWith(
+        "SELECT u.account_type, p.picture_storage_key, p.picture_mime_type",
+      )
+    ) {
+      const user = this.users.get(params[0])
+      const profile = this.userProfiles.get(params[0])
+      return user
+        ? {
+            rows: [
+              {
+                account_type: user.account_type,
+                picture_storage_key: profile?.picture_storage_key || null,
+                picture_mime_type: profile?.picture_mime_type || null,
+              },
+            ],
+            rowCount: 1,
+          }
+        : { rows: [], rowCount: 0 }
+    }
     if (queryText.startsWith("SELECT c.public_id, c.status, c.updated_at")) {
       return { rows: this.conversations, rowCount: this.conversations.length }
     }
     if (queryText.startsWith("SELECT m.id, m.body")) {
-      const visible = this.messages.filter((message) =>
-        !this.hiddenMessages.some(
-          (hidden) => hidden.message_id === message.id && hidden.user_id === params[1],
-        ),
+      const visible = this.messages.filter(
+        (message) =>
+          !this.hiddenMessages.some(
+            (hidden) =>
+              hidden.message_id === message.id && hidden.user_id === params[1],
+          ),
       )
       return { rows: visible, rowCount: visible.length }
     }
@@ -629,17 +1158,23 @@ class FakePool {
       const message = this.messages.find((item) => item.id === params[0])
       return message
         ? {
-            rows: [{
-              ...message,
-              conversation_id: this.conversation.id,
-              seeker_id: this.conversation.seeker_id,
-              counselor_id: this.conversation.counselor_id,
-            }],
+            rows: [
+              {
+                ...message,
+                conversation_id: this.conversation.id,
+                seeker_id: this.conversation.seeker_id,
+                counselor_id: this.conversation.counselor_id,
+              },
+            ],
             rowCount: 1,
           }
         : { rows: [], rowCount: 0 }
     }
-    if (queryText.startsWith("INSERT INTO messages (conversation_id, sender_id, body)")) {
+    if (
+      queryText.startsWith(
+        "INSERT INTO messages (conversation_id, sender_id, body)",
+      )
+    ) {
       const message = {
         id: `message-${this.messages.length + 1}`,
         body: params[2],
@@ -658,7 +1193,11 @@ class FakePool {
       message.edited_at = new Date().toISOString()
       return { rows: [{ ...message }], rowCount: 1 }
     }
-    if (queryText.startsWith("UPDATE messages SET body = 'This message was deleted'")) {
+    if (
+      queryText.startsWith(
+        "UPDATE messages SET body = 'This message was deleted'",
+      )
+    ) {
       const message = this.messages.find((item) => item.id === params[0])
       if (!message) return { rows: [], rowCount: 0 }
       message.body = "This message was deleted"
@@ -666,9 +1205,12 @@ class FakePool {
       return { rows: [], rowCount: 1 }
     }
     if (queryText.startsWith("INSERT INTO message_user_hides")) {
-      if (!this.hiddenMessages.some(
-        (hidden) => hidden.message_id === params[0] && hidden.user_id === params[1],
-      )) {
+      if (
+        !this.hiddenMessages.some(
+          (hidden) =>
+            hidden.message_id === params[0] && hidden.user_id === params[1],
+        )
+      ) {
         this.hiddenMessages.push({ message_id: params[0], user_id: params[1] })
       }
       return { rows: [], rowCount: 1 }
@@ -676,16 +1218,24 @@ class FakePool {
     if (queryText.startsWith("UPDATE messages SET delivered_at = COALESCE")) {
       const timestamp = new Date().toISOString()
       const updated = this.messages.filter(
-        (message) => params[1].includes(message.id) && message.sender_id !== params[2],
+        (message) =>
+          params[1].includes(message.id) && message.sender_id !== params[2],
       )
       for (const message of updated) {
         message.delivered_at ||= timestamp
-        if (queryText.includes("read_at = COALESCE")) message.read_at ||= timestamp
+        if (queryText.includes("read_at = COALESCE"))
+          message.read_at ||= timestamp
       }
-      return { rows: updated.map(({ id }) => ({ id })), rowCount: updated.length }
+      return {
+        rows: updated.map(({ id }) => ({ id })),
+        rowCount: updated.length,
+      }
     }
     if (queryText.startsWith("SELECT m.body")) {
-      return { rows: [{ body: "Assigned message", sender_role: "counselor" }], rowCount: 1 }
+      return {
+        rows: [{ body: "Assigned message", sender_role: "counselor" }],
+        rowCount: 1,
+      }
     }
     return { rows: [], rowCount: 0 }
   }
@@ -706,6 +1256,7 @@ function counselorApplication(overrides = {}) {
     generalLocation: "Monrovia",
     professionalTitle: "Pastoral Counselor",
     specialization: "Family support",
+    supportCategoryIds: ["relationships-marriage"],
     highestQualification: "Master of Counseling",
     institution: "Example University",
     qualificationType: "Degree",
@@ -715,7 +1266,8 @@ function counselorApplication(overrides = {}) {
     licenseNumber: "",
     licensingAuthority: "",
     licenseExpiry: null,
-    biography: "Experienced counselor providing compassionate and confidential support.",
+    biography:
+      "Experienced counselor providing compassionate and confidential support.",
     areasOfExpertise: ["Pastoral counseling", "Family support"],
     languages: ["English"],
     workHistory: "",
@@ -784,18 +1336,22 @@ describe("account credential helpers", () => {
 
   it("hashes opaque sessions and excludes internal credentials from user data", () => {
     const token = createSessionToken()
-    expect(hashSessionToken(token)).not.toEqual(hashSessionToken(createSessionToken()))
+    expect(hashSessionToken(token)).not.toEqual(
+      hashSessionToken(createSessionToken()),
+    )
     expect(hashSessionToken(token)).toHaveLength(32)
-    expect(safeUser({
-      id: "internal-id",
-      public_id: "AN-23456789",
-      account_type: "anonymous",
-      role: "anonymous",
-      status: "active",
-      display_name: null,
-      password_hash: "never-return",
-      recovery_code_hash: "never-return",
-    })).toEqual({
+    expect(
+      safeUser({
+        id: "internal-id",
+        public_id: "AN-23456789",
+        account_type: "anonymous",
+        role: "anonymous",
+        status: "active",
+        display_name: null,
+        password_hash: "never-return",
+        recovery_code_hash: "never-return",
+      }),
+    ).toEqual({
       publicId: "AN-23456789",
       accountType: "anonymous",
       role: "anonymous",
@@ -808,15 +1364,174 @@ describe("account credential helpers", () => {
     const allowed = new Set([origin])
     expect(isAllowedOrigin(origin, allowed)).toBe(true)
     expect(isAllowedOrigin("https://attacker.example", allowed)).toBe(false)
-    const conversation = { seeker_id: "seeker", counselor_id: "assigned", status: "active" }
-    expect(canAccessConversation({ id: "seeker", role: "anonymous", status: "active" }, conversation)).toBe(true)
-    expect(canAccessConversation({ id: "assigned", role: "counselor", status: "active" }, conversation)).toBe(true)
-    expect(canAccessConversation({ id: "other", role: "counselor", status: "active" }, conversation)).toBe(false)
-    expect(canAccessConversation({ id: "admin", role: "superadmin", status: "active" }, conversation)).toBe(false)
+    const conversation = {
+      seeker_id: "seeker",
+      counselor_id: "assigned",
+      status: "active",
+    }
+    expect(
+      canAccessConversation(
+        { id: "seeker", role: "anonymous", status: "active" },
+        conversation,
+      ),
+    ).toBe(true)
+    expect(
+      canAccessConversation(
+        { id: "assigned", role: "counselor", status: "active" },
+        conversation,
+      ),
+    ).toBe(true)
+    expect(
+      canAccessConversation(
+        { id: "other", role: "counselor", status: "active" },
+        conversation,
+      ),
+    ).toBe(false)
+    expect(
+      canAccessConversation(
+        { id: "admin", role: "superadmin", status: "active" },
+        conversation,
+      ),
+    ).toBe(false)
   })
 })
 
 describe("Express authentication and authorization", () => {
+  it("anonymizes and deactivates a user without deleting historical records or affecting unrelated sessions", async () => {
+    const pool = new FakePool()
+    const adminCookie = addSuperAdmin(pool)
+    const user = {
+      id: "account-to-anonymize",
+      public_id: "SC-12345678",
+      account_type: "registered",
+      role: "registered",
+      status: "active",
+      display_name: "Private name",
+      email: "person@example.org",
+      email_normalized: "person@example.org",
+      password_hash: "existing-password-hash",
+      recovery_code_hash: "existing-recovery-hash",
+    }
+    pool.users.set(user.id, user)
+    pool.userProfiles.set(user.id, {
+      user_id: user.id,
+      display_name: "Private name",
+      bio: "Private profile biography",
+      picture_storage_key: "private-picture-key",
+      picture_mime_type: "image/jpeg",
+    })
+
+    const userSessionToken = createSessionToken()
+    pool.sessions.set(hashSessionToken(userSessionToken).toString("hex"), {
+      revoked: false,
+      user,
+    })
+    const adminSession = [...pool.sessions.values()][0]
+    const existingConversation = {
+      id: "retained-conversation",
+      seeker_id: user.id,
+    }
+    const existingMessage = {
+      id: "retained-message",
+      sender_id: user.id,
+      body: "Retained message",
+    }
+    pool.conversations.push(existingConversation)
+    pool.messages.push(existingMessage)
+    pool.application = {
+      id: "retained-application",
+      user_id: user.id,
+      status: "APPROVED",
+    }
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
+    const result = await request(app)
+      .delete(`/api/admin/users/${user.public_id}`)
+      .set("Origin", origin)
+      .set("Cookie", adminCookie)
+    expect(result.status).toBe(200)
+    expect(result.body.account).toMatchObject({
+      publicId: user.public_id,
+      status: "deactivated",
+      anonymized: true,
+    })
+    expect(user.status).toBe("deactivated")
+    expect(user.anonymized_at).toBeTruthy()
+    expect(user.email).toBeNull()
+    expect(user.email_normalized).toBeNull()
+    expect(user.password_hash).not.toBe("existing-password-hash")
+    expect(user.recovery_code_hash).not.toBe("existing-recovery-hash")
+    expect(pool.userProfiles.get(user.id)).toMatchObject({
+      display_name: null,
+      bio: "",
+      picture_storage_key: null,
+      picture_mime_type: null,
+    })
+    expect(
+      pool.sessions.get(hashSessionToken(userSessionToken).toString("hex"))
+        .revoked,
+    ).toBe(true)
+    expect(adminSession.revoked).toBe(false)
+    expect(pool.conversations).toEqual([existingConversation])
+    expect(pool.messages).toEqual([existingMessage])
+    expect(pool.application).toMatchObject({
+      id: "retained-application",
+      status: "APPROVED",
+    })
+    expect(pool.auditLogs.at(-1)).toMatchObject({
+      action: "account.anonymized_and_deactivated",
+      target_id: user.id,
+    })
+    const attemptedReactivation = await request(app)
+      .patch(`/api/admin/users/${user.public_id}/status`)
+      .set("Origin", origin)
+      .set("Cookie", adminCookie)
+      .send({ status: "active" })
+    expect(attemptedReactivation.status).toBe(409)
+  })
+  it("does not allow non-admins, self-deactivation, or SuperAdmin targets to be anonymized", async () => {
+    const pool = new FakePool()
+    const adminCookie = addSuperAdmin(pool)
+    const user = {
+      id: "ordinary-user",
+      public_id: "SC-87654321",
+      account_type: "registered",
+      role: "registered",
+      status: "active",
+    }
+    const otherAdmin = {
+      id: "second-admin",
+      public_id: "SA-87654321",
+      account_type: "registered",
+      role: "superadmin",
+      status: "active",
+    }
+    pool.users.set(user.id, user)
+    pool.users.set(otherAdmin.id, otherAdmin)
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
+    expect(
+      (await request(app).delete(`/api/admin/users/${user.public_id}`)).status,
+    ).toBe(403)
+    const self = await request(app)
+      .delete("/api/admin/users/SA-23456789")
+      .set("Origin", origin)
+      .set("Cookie", adminCookie)
+    expect(self.status).toBe(409)
+    const protectedAdmin = await request(app)
+      .delete(`/api/admin/users/${otherAdmin.public_id}`)
+      .set("Origin", origin)
+      .set("Cookie", adminCookie)
+    expect(protectedAdmin.status).toBe(409)
+    expect(user.status).toBe("active")
+    expect(otherAdmin.status).toBe("active")
+  })
   it("serves public site settings but limits homepage-image changes to SuperAdmins", async () => {
     const pool = new FakePool()
     const admin = {
@@ -833,12 +1548,20 @@ describe("Express authentication and authorization", () => {
       revoked: false,
       user: admin,
     })
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
-
-    expect((await request(app).get("/api/site-settings")).body.homepageImageUrl).toBeNull()
-    expect((await request(app).get("/api/site-settings/homepage-image")).status).toBe(404)
-    expect((await request(app).get("/api/admin/site-settings")).status).toBe(401)
-
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
+    expect(
+      (await request(app).get("/api/site-settings")).body.homepageImageUrl,
+    ).toBeNull()
+    expect(
+      (await request(app).get("/api/site-settings/homepage-image")).status,
+    ).toBe(404)
+    expect((await request(app).get("/api/admin/site-settings")).status).toBe(
+      401,
+    )
     const seeker = {
       ...admin,
       id: "site-seeker-id",
@@ -866,14 +1589,22 @@ describe("Express authentication and authorization", () => {
       .set("Origin", origin)
       .set("Cookie", `sc_session=${adminToken}`)
       .field("homepageImageAlt", "A welcoming ministry community")
-      .attach("homepageImage", png, { filename: "homepage.png", contentType: "image/png" })
+      .attach("homepageImage", png, {
+        filename: "homepage.png",
+        contentType: "image/png",
+      })
     expect(uploaded.status).toBe(200)
     expect(uploaded.body.homepageImageType).toBe("image/png")
-    expect(uploaded.body.homepageImageAlt).toBe("A welcoming ministry community")
-
+    expect(uploaded.body.homepageImageAlt).toBe(
+      "A welcoming ministry community",
+    )
     const publicSettings = await request(app).get("/api/site-settings")
-    expect(publicSettings.body.homepageImageUrl).toMatch(/^\/site-settings\/homepage-image\?v=/)
-    expect(publicSettings.body.homepageImageAlt).toBe("A welcoming ministry community")
+    expect(publicSettings.body.homepageImageUrl).toMatch(
+      /^\/site-settings\/homepage-image\?v=/,
+    )
+    expect(publicSettings.body.homepageImageAlt).toBe(
+      "A welcoming ministry community",
+    )
     const image = await request(app).get("/api/site-settings/homepage-image")
     expect(image.status).toBe(200)
     expect(image.headers["content-type"]).toMatch(/^image\/png/)
@@ -898,7 +1629,9 @@ describe("Express authentication and authorization", () => {
       .set("Origin", origin)
       .set("Cookie", `sc_session=${adminToken}`)
     expect(removed.status).toBe(204)
-    expect((await request(app).get("/api/site-settings")).body.homepageImageUrl).toBeNull()
+    expect(
+      (await request(app).get("/api/site-settings")).body.homepageImageUrl,
+    ).toBeNull()
   })
 
   it("changes an account password only after verifying the current password and revokes other sessions", async () => {
@@ -927,28 +1660,52 @@ describe("Express authentication and authorization", () => {
       revoked: false,
       user,
     })
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const change = (current, next) =>
       request(app)
         .patch("/api/me/password")
         .set("Origin", origin)
         .set("Cookie", `sc_session=${currentToken}`)
         .send({ currentPassword: current, newPassword: next })
-
-    expect((await change("wrong-current-password", "a-different-long-password")).status).toBe(403)
+    expect(
+      (await change("wrong-current-password", "a-different-long-password"))
+        .status,
+    ).toBe(403)
     expect((await change(currentPassword, currentPassword)).status).toBe(400)
     const updated = await change(currentPassword, "a-different-long-password")
     expect(updated.status).toBe(200)
-    expect(await argon2.verify(user.password_hash, "a-different-long-password")).toBe(true)
-    expect((await request(app).get("/api/me").set("Cookie", `sc_session=${currentToken}`)).status)
+    expect(
+      await argon2.verify(user.password_hash, "a-different-long-password"),
+    ).toBe(true)
+    expect(
+      (
+        await request(app)
+          .get("/api/me")
+          .set("Cookie", `sc_session=${currentToken}`)
+      ).status,
+    )
       .toBe(200)
-    expect((await request(app).get("/api/me").set("Cookie", `sc_session=${otherToken}`)).status)
+    expect(
+      (
+        await request(app)
+          .get("/api/me")
+          .set("Cookie", `sc_session=${otherToken}`)
+      ).status,
+    )
       .toBe(401)
   })
 
   it("requires regular-user consent and creates only the submitted regular role", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const missingConsent = await request(app)
       .post("/api/auth/register")
       .set("Origin", origin)
@@ -974,14 +1731,278 @@ describe("Express authentication and authorization", () => {
     expect(created.body.user.accountType).toBe("registered")
     expect(created.body.user.role).toBe("registered")
     const cookie = cookieFrom(created)
-    expect((await request(app).get("/api/journey").set("Cookie", cookie)).status).toBe(200)
-    expect((await request(app).get("/api/counselor/cases").set("Cookie", cookie)).status).toBe(403)
-    expect((await request(app).get("/api/admin/summary").set("Cookie", cookie)).status).toBe(403)
+    expect(
+      (await request(app).get("/api/journey").set("Cookie", cookie)).status,
+    ).toBe(200)
+    const initialJourney = await request(app)
+      .get("/api/journey")
+      .set("Cookie", cookie)
+    expect(initialJourney.body.progress).toHaveLength(6)
+    expect(
+      initialJourney.body.progress.every(
+        (item) => item.status === "not_started",
+      ),
+    ).toBe(true)
+    const startedStage = await request(app)
+      .patch("/api/journey/Come")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ status: "in_progress" })
+    expect(startedStage.status).toBe(200)
+    const skippedStage = await request(app)
+      .patch("/api/journey/Connect")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ status: "in_progress" })
+    expect(skippedStage.status).toBe(409)
+    expect(skippedStage.body.currentStage).toBe("Come")
+    const completedStage = await request(app)
+      .patch("/api/journey/Come")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ status: "completed" })
+    expect(completedStage.status).toBe(200)
+    expect(completedStage.body.progress).toMatchObject({
+      stage: "Come",
+      status: "completed",
+    })
+    const nextStage = await request(app)
+      .patch("/api/journey/Connect")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ status: "in_progress" })
+    expect(nextStage.status).toBe(200)
+    const prematureCompletion = await request(app)
+      .patch("/api/journey/Counsel")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ status: "completed" })
+    expect(prematureCompletion.status).toBe(409)
+    const savedJourney = await request(app)
+      .get("/api/journey")
+      .set("Cookie", cookie)
+    expect(savedJourney.body.progress[0]).toMatchObject({
+      stage: "Come",
+      status: "completed",
+    })
+    expect(savedJourney.body.progress[1]).toMatchObject({
+      stage: "Connect",
+      status: "in_progress",
+    })
+    const invalidStage = await request(app)
+      .patch("/api/journey/Not-a-stage")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ status: "in_progress" })
+    expect(invalidStage.status).toBe(400)
+    expect(
+      (await request(app).get("/api/counselor/cases").set("Cookie", cookie))
+        .status,
+    ).toBe(403)
+    expect(
+      (await request(app).get("/api/admin/summary").set("Cookie", cookie))
+        .status,
+    ).toBe(403)
+  })
+  it("stores optional registration demographics privately and lets the owner update them", async () => {
+    const pool = new FakePool()
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
+    const unsupportedRegistrationGender = await request(app)
+      .post("/api/auth/register")
+      .set("Origin", origin)
+      .send({
+        email: "unsupported-gender@example.org",
+        displayName: "Unsupported Gender",
+        password: "a-long-private-password",
+        gender: "non_binary",
+        consent: true,
+      })
+    expect(unsupportedRegistrationGender.status).toBe(400)
+    const created = await request(app)
+      .post("/api/auth/register")
+      .set("Origin", origin)
+      .send({
+        email: "demographics@example.org",
+        displayName: "Private Profile",
+        password: "a-long-private-password",
+        ageRange: "25_34",
+        gender: "male",
+        consent: true,
+      })
+    expect(created.status).toBe(201)
+    const cookie = cookieFrom(created)
+    const profile = await request(app)
+      .get("/api/me/profile")
+      .set("Cookie", cookie)
+    expect(profile.body.profile).toMatchObject({
+      ageRange: "25_34",
+      gender: "male",
+    })
+    expect(created.body.user).not.toHaveProperty("ageRange")
+    expect(created.body.user).not.toHaveProperty("gender")
+    const updated = await request(app)
+      .patch("/api/me")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({
+        displayName: "Private Profile",
+        ageRange: "35_44",
+        gender: "female",
+      })
+    expect(updated.status).toBe(200)
+    expect(pool.userProfile).toMatchObject({
+      age_range: "35_44",
+      gender: "female",
+      gender_description: null,
+    })
+    const unsupported = await request(app)
+      .patch("/api/me")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({
+        displayName: "Private Profile",
+        gender: "non_binary",
+      })
+    expect(unsupported.status).toBe(400)
+  })
+  it("matches only active approved counselors by category and carries the category into requests", async () => {
+    const pool = new FakePool()
+    pool.counselorDirectory = [
+      {
+        public_id: "CA-PRAYER001",
+        user_id: "counselor-prayer",
+        display_name: "Prayer Counselor",
+        headline: "Pastoral counselor",
+        bio: "Prayer support",
+        areas: [],
+        specialties: ["Prayer & spiritual growth"],
+        category_ids: ["prayer-spiritual-growth"],
+        approved: true,
+        active: true,
+      },
+      {
+        public_id: "CA-RELATE001",
+        user_id: "counselor-relationships",
+        display_name: "Relationship Counselor",
+        headline: "Family counselor",
+        bio: "Relationship support",
+        areas: [],
+        specialties: ["Relationships / marriage"],
+        category_ids: ["relationships-marriage"],
+        approved: true,
+        active: true,
+      },
+      {
+        public_id: "CA-PENDING1",
+        display_name: "Unapproved Counselor",
+        category_ids: ["prayer-spiritual-growth"],
+        approved: false,
+        active: true,
+      },
+    ]
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
+    const matches = await request(app)
+      .get("/api/counselors/matches?categoryId=prayer-spiritual-growth")
+    expect(matches.status).toBe(200)
+    expect(matches.body.counselors.map((item) => item.publicId)).toEqual([
+      "CA-PRAYER001",
+    ])
+    expect(matches.body.counselors[0].areas).toContain(
+      "Prayer & spiritual growth",
+    )
+    const all = await request(app).get("/api/counselors/matches?all=true")
+    expect(all.body.counselors.map((item) => item.publicId)).toEqual([
+      "CA-PRAYER001",
+      "CA-RELATE001",
+    ])
+    expect((await request(app).get("/api/counselors/matches")).status).toBe(400)
+    const user = await request(app)
+      .post("/api/auth/register")
+      .set("Origin", origin)
+      .send({
+        email: "category-request@example.org",
+        displayName: "Category User",
+        password: "a-long-private-password",
+        consent: true,
+      })
+    const requestResult = await request(app)
+      .post("/api/requests")
+      .set("Origin", origin)
+      .set("Cookie", cookieFrom(user))
+      .send({
+        counselorPublicId: "CA-PRAYER001",
+        need: "Prayer & spiritual growth",
+        supportCategoryId: "prayer-spiritual-growth",
+        topic: "Prayer support",
+        description: "",
+      })
+    expect(requestResult.status).toBe(201)
+    expect(requestResult.body.request.support_category_id).toBe(
+      "prayer-spiritual-growth",
+    )
+    expect(pool.counselingRequests[0].support_category_id).toBe(
+      "prayer-spiritual-growth",
+    )
+  })
+  it("allows only SuperAdmins to manage specialties for active approved counselors", async () => {
+    const pool = new FakePool()
+    const counselor = {
+      id: "approved-counselor",
+      public_id: "CA-APPROVED1",
+      account_type: "counselor",
+      role: "counselor",
+      status: "active",
+    }
+    pool.users.set(counselor.id, counselor)
+    pool.counselorProfile = {
+      user_id: counselor.id,
+      approved: true,
+      support_category_ids: [],
+    }
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
+    const body = { categoryIds: ["bible-questions"] }
+    const unauthenticated = await request(app)
+      .patch("/api/admin/users/CA-APPROVED1/specialties")
+      .set("Origin", origin)
+      .send(body)
+    expect(unauthenticated.status).toBe(401)
+    const adminCookie = addSuperAdmin(pool)
+    const saved = await request(app)
+      .patch("/api/admin/users/CA-APPROVED1/specialties")
+      .set("Origin", origin)
+      .set("Cookie", adminCookie)
+      .send(body)
+    expect(saved.status).toBe(200)
+    expect(saved.body.approvedCategoryIds).toEqual(body.categoryIds)
+    expect(pool.counselorProfile.support_category_ids).toEqual(body.categoryIds)
+    expect(pool.auditLogs.at(-1).action).toBe("counselor.specialties_updated")
+    const invalidCategory = await request(app)
+      .patch("/api/admin/users/CA-APPROVED1/specialties")
+      .set("Origin", origin)
+      .set("Cookie", adminCookie)
+      .send({ categoryIds: ["not-a-category"] })
+    expect(invalidCategory.status).toBe(400)
   })
 
   it("lets an existing regular account apply without creating a duplicate identity", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const registered = await request(app)
       .post("/api/auth/register")
       .set("Origin", origin)
@@ -1014,6 +2035,7 @@ describe("Express authentication and authorization", () => {
         fullLegalName: "Existing User",
         preferredDisplayName: null,
         specialization: "Family support",
+        supportCategoryIds: ["relationships-marriage"],
         codeOfConductAccepted: true,
         confidentialityAccepted: true,
         safeguardingAccepted: true,
@@ -1031,11 +2053,14 @@ describe("Express authentication and authorization", () => {
       .get("/api/counselor/applications/me")
       .set("Cookie", cookie)
     expect(status.status).toBe(200)
-    expect(status.body.application.publicRef).toBe(submitted.body.application.publicRef)
-
+    expect(status.body.application.publicRef).toBe(
+      submitted.body.application.publicRef,
+    )
     const adminCookie = addSuperAdmin(pool)
     const approved = await request(app)
-      .patch(`/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`)
+      .patch(
+        `/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`,
+      )
       .set("Origin", origin)
       .set("Cookie", adminCookie)
       .send({ action: "APPROVED" })
@@ -1045,16 +2070,22 @@ describe("Express authentication and authorization", () => {
 
   it("accepts a counselor application without documents and leaves counselor access disabled", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const submitted = await request(app)
       .post("/api/auth/counselor")
       .set("Origin", origin)
-      .field("application", JSON.stringify({
-        ...basicCounselorApplication(),
-        role: "counselor",
-        approvalStatus: "APPROVED",
-      }))
-
+      .field(
+        "application",
+        JSON.stringify({
+          ...basicCounselorApplication(),
+          role: "counselor",
+          approvalStatus: "APPROVED",
+        }),
+      )
     expect(submitted.status).toBe(201)
     expect(submitted.body.user.accountType).toBe("counselor")
     expect(submitted.body.user.role).toBe("registered")
@@ -1075,7 +2106,9 @@ describe("Express authentication and authorization", () => {
       .get("/api/counselor/cases")
       .set("Cookie", cookie)
     expect(counselorCases.status).toBe(403)
-    const seekerRequests = await request(app).get("/api/requests").set("Cookie", cookie)
+    const seekerRequests = await request(app)
+      .get("/api/requests")
+      .set("Cookie", cookie)
     expect(seekerRequests.status).toBe(403)
     const applicationAdministration = await request(app)
       .get("/api/admin/counselor-applications")
@@ -1084,7 +2117,9 @@ describe("Express authentication and authorization", () => {
 
     const adminCookie = addSuperAdmin(pool)
     const approved = await request(app)
-      .patch(`/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`)
+      .patch(
+        `/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`,
+      )
       .set("Origin", origin)
       .set("Cookie", adminCookie)
       .send({ action: "APPROVED" })
@@ -1093,12 +2128,17 @@ describe("Express authentication and authorization", () => {
     expect(pool.application.qualification_verified).toBe(false)
     expect(pool.application.license_verified).toBe(false)
     expect(pool.users.get("internal-user-id").role).toBe("counselor")
-    expect((await request(app).get("/api/counselor/cases").set("Cookie", cookie)).status).toBe(200)
+    expect(
+      (await request(app).get("/api/counselor/cases").set("Cookie", cookie))
+        .status,
+    ).toBe(200)
   })
 
   it("permits approval with partially provided optional credentials without credential verification", async () => {
     const pool = new FakePool()
-    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherdconnect-optional-counselor-"))
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherdconnect-optional-counselor-"),
+    )
     try {
       const app = createApp({
         pool,
@@ -1109,10 +2149,15 @@ describe("Express authentication and authorization", () => {
       const submitted = await request(app)
         .post("/api/auth/counselor")
         .set("Origin", origin)
-        .field("application", JSON.stringify(basicCounselorApplication({
-          licenseNumber: "LIC-OPTIONAL-001",
-          licensingAuthority: "Optional Board",
-        })))
+        .field(
+          "application",
+          JSON.stringify(
+            basicCounselorApplication({
+              licenseNumber: "LIC-OPTIONAL-001",
+              licensingAuthority: "Optional Board",
+            }),
+          ),
+        )
         .attach("qualificationDocuments", Buffer.from("%PDF-1.7\noptional"), {
           filename: "optional-credential.pdf",
           contentType: "application/pdf",
@@ -1169,7 +2214,9 @@ describe("Express authentication and authorization", () => {
           referencesText: "Available on request",
         })
       expect(profileUpdate.status).toBe(200)
-      expect(pool.application.biography).toBe("I offer compassionate, confidential support.")
+      expect(pool.application.biography).toBe(
+        "I offer compassionate, confidential support.",
+      )
       expect(pool.application.work_history).toBe("Community counseling")
       expect(pool.application.qualification_verified).toBe(false)
       expect(pool.qualifications).toHaveLength(1)
@@ -1189,8 +2236,11 @@ describe("Express authentication and authorization", () => {
       expect(uploaded.status).toBe(201)
       expect(uploaded.body.documents).toHaveLength(2)
       expect(pool.documents).toHaveLength(3)
-      expect(pool.documents.slice(1).every((document) => document.status === "uploaded")).toBe(true)
-
+      expect(
+        pool.documents
+          .slice(1)
+          .every((document) => document.status === "uploaded"),
+      ).toBe(true)
       const profile = await request(app)
         .get("/api/counselor/profile")
         .set("Cookie", applicantCookie)
@@ -1203,20 +2253,32 @@ describe("Express authentication and authorization", () => {
 
   it("keeps specialization and biography required and records rejection reasons", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const missingRequired = await request(app)
       .post("/api/auth/counselor")
       .set("Origin", origin)
-      .field("application", JSON.stringify(basicCounselorApplication({
-        fullLegalName: "",
-        specialization: "",
-        biography: "",
-      })))
+      .field(
+        "application",
+        JSON.stringify(
+          basicCounselorApplication({
+            fullLegalName: "",
+            specialization: "",
+            biography: "",
+          }),
+        ),
+      )
     expect(missingRequired.status).toBe(400)
     const invalidEmail = await request(app)
       .post("/api/auth/counselor")
       .set("Origin", origin)
-      .field("application", JSON.stringify(basicCounselorApplication({ email: "not-an-email" })))
+      .field(
+        "application",
+        JSON.stringify(basicCounselorApplication({ email: "not-an-email" })),
+      )
     expect(invalidEmail.status).toBe(400)
     expect(pool.application).toBeNull()
 
@@ -1238,7 +2300,10 @@ describe("Express authentication and authorization", () => {
       .patch(`/api/admin/counselor-applications/${reference}/review`)
       .set("Origin", origin)
       .set("Cookie", adminCookie)
-      .send({ action: "REJECTED", reason: "Please add the missing biography details." })
+      .send({
+        action: "REJECTED",
+        reason: "Please add the missing biography details.",
+      })
     expect(rejected.status).toBe(200)
     expect(pool.application.status).toBe("REJECTED")
     expect(pool.users.get("internal-user-id").role).toBe("registered")
@@ -1246,7 +2311,11 @@ describe("Express authentication and authorization", () => {
 
   it("requires SuperAdmin review and supports separate credential verification", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const submitted = await request(app)
       .post("/api/auth/counselor")
       .set("Origin", origin)
@@ -1293,8 +2362,12 @@ describe("Express authentication and authorization", () => {
     const applicantStatus = await request(app)
       .get("/api/counselor/applications/me")
       .set("Cookie", applicantCookie)
-    expect(applicantStatus.body.application.status).toBe("MORE_INFORMATION_REQUIRED")
-    expect(applicantStatus.body.application.documents[0].status).toBe("requested")
+    expect(applicantStatus.body.application.status).toBe(
+      "MORE_INFORMATION_REQUIRED",
+    )
+    expect(applicantStatus.body.application.documents[0].status).toBe(
+      "requested",
+    )
     expect(applicantStatus.body.application.informationRequests).toHaveLength(1)
 
     const applicantResponse = await request(app)
@@ -1316,13 +2389,18 @@ describe("Express authentication and authorization", () => {
       .patch(`/api/admin/counselor-applications/${reference}/review`)
       .set("Origin", origin)
       .set("Cookie", adminCookie)
-      .send({ action: "APPROVED", reason: "Application reviewed and approved." })
+      .send({
+        action: "APPROVED",
+        reason: "Application reviewed and approved.",
+      })
     expect(approved.status).toBe(200)
     expect(pool.application.status).toBe("APPROVED")
     expect(pool.users.get("internal-user-id").role).toBe("counselor")
 
     const verified = await request(app)
-      .patch(`/api/admin/counselor-applications/${reference}/qualifications/20000000-0000-4000-8000-000000000001/verification`)
+      .patch(
+        `/api/admin/counselor-applications/${reference}/qualifications/20000000-0000-4000-8000-000000000001/verification`,
+      )
       .set("Origin", origin)
       .set("Cookie", adminCookie)
       .send({ verified: true, reason: "Credential verified with issuer." })
@@ -1341,12 +2419,22 @@ describe("Express authentication and authorization", () => {
       .send({ status: "suspended" })
     expect(suspended.status).toBe(200)
     expect(pool.application.status).toBe("APPROVED")
-    expect((await request(app).get("/api/counselor/cases").set("Cookie", applicantCookie)).status).toBe(401)
+    expect(
+      (
+        await request(app)
+          .get("/api/counselor/cases")
+          .set("Cookie", applicantCookie)
+      ).status,
+    ).toBe(401)
   })
 
   it("rejects forged counselor status and invalid document content", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const rejected = await request(app)
       .post("/api/auth/counselor")
       .set("Origin", origin)
@@ -1362,7 +2450,9 @@ describe("Express authentication and authorization", () => {
 
   it("stores counselor documents privately and denies access to unrelated users", async () => {
     const pool = new FakePool()
-    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherdconnect-docs-"))
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherdconnect-docs-"),
+    )
     try {
       const app = createApp({
         pool,
@@ -1374,10 +2464,14 @@ describe("Express authentication and authorization", () => {
         .post("/api/auth/counselor")
         .set("Origin", origin)
         .field("application", JSON.stringify(counselorApplication()))
-        .attach("qualificationDocuments", Buffer.from("%PDF-1.7\nprivate document"), {
-          filename: "credential.pdf",
-          contentType: "application/pdf",
-        })
+        .attach(
+          "qualificationDocuments",
+          Buffer.from("%PDF-1.7\nprivate document"),
+          {
+            filename: "credential.pdf",
+            contentType: "application/pdf",
+          },
+        )
       expect(submitted.status).toBe(201)
       expect(pool.documents).toHaveLength(1)
       expect(pool.documents[0].storage_key).toMatch(/^[a-f0-9]{64}$/)
@@ -1417,7 +2511,9 @@ describe("Express authentication and authorization", () => {
 
   it("allows only reviewer-requested additional documents from the applicant", async () => {
     const pool = new FakePool()
-    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherdconnect-extra-docs-"))
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherdconnect-extra-docs-"),
+    )
     try {
       const app = createApp({
         pool,
@@ -1485,7 +2581,11 @@ describe("Express authentication and authorization", () => {
 
   it("creates a private account, authenticates a server session, and rotates recovery material", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const created = await request(app)
       .post("/api/auth/anonymous")
       .set("Origin", origin)
@@ -1513,8 +2613,9 @@ describe("Express authentication and authorization", () => {
       })
     expect(recovered.status).toBe(200)
     expect(recovered.body.recoveryCode).not.toBe(created.body.recoveryCode)
-    expect((await request(app).get("/api/me").set("Cookie", oldCookie)).status).toBe(401)
-
+    expect(
+      (await request(app).get("/api/me").set("Cookie", oldCookie)).status,
+    ).toBe(401)
     const oldCode = await request(app)
       .post("/api/auth/recover")
       .set("Origin", origin)
@@ -1528,21 +2629,29 @@ describe("Express authentication and authorization", () => {
     const login = await request(app)
       .post("/api/auth/login")
       .set("Origin", origin)
-      .send({ login: created.body.user.publicId, password: "a-different-secure-password" })
+      .send({
+        login: created.body.user.publicId,
+        password: "a-different-secure-password",
+      })
     expect(login.status).toBe(200)
   }, 30_000)
 
   it("persists the user's optional profile bio and scopes notifications to their owner", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const created = await request(app)
       .post("/api/auth/anonymous")
       .set("Origin", origin)
       .send({ password: "a-long-private-password" })
     expect(created.status).toBe(201)
     const cookie = cookieFrom(created)
-
-    const profile = await request(app).get("/api/me/profile").set("Cookie", cookie)
+    const profile = await request(app)
+      .get("/api/me/profile")
+      .set("Cookie", cookie)
     expect(profile.status).toBe(200)
     expect(profile.body.profile.bio).toBe("")
 
@@ -1578,11 +2687,14 @@ describe("Express authentication and authorization", () => {
         read_at: null,
       },
     ]
-    const notifications = await request(app).get("/api/notifications").set("Cookie", cookie)
+    const notifications = await request(app)
+      .get("/api/notifications")
+      .set("Cookie", cookie)
     expect(notifications.status).toBe(200)
     expect(notifications.body.notifications).toHaveLength(1)
-    expect(notifications.body.notifications[0].id).toBe(pool.notifications[0].id)
-
+    expect(notifications.body.notifications[0].id).toBe(
+      pool.notifications[0].id,
+    )
     const otherUsersNotification = await request(app)
       .patch("/api/notifications/52bbbcdf-bef2-44ce-a799-8fa6c6c56300/read")
       .set("Origin", origin)
@@ -1600,7 +2712,9 @@ describe("Express authentication and authorization", () => {
 
   it("stores, serves, replaces, and removes a private profile picture for its owner", async () => {
     const pool = new FakePool()
-    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherd-profile-picture-test-"))
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherd-profile-picture-test-"),
+    )
     const app = createApp({
       pool,
       allowedOrigins: origin,
@@ -1638,9 +2752,14 @@ describe("Express authentication and authorization", () => {
       expect(uploaded.status, JSON.stringify(uploaded.body)).toBe(200)
       expect(pool.userProfile.picture_mime_type).toBe("image/jpeg")
       expect(pool.userProfile.picture_storage_key).toMatch(/^[a-f0-9]{64}$/)
-      await expect(access(path.join(privateDirectory, pool.userProfile.picture_storage_key))).resolves.toBeUndefined()
-
-      const served = await request(app).get("/api/me/profile/picture").set("Cookie", cookie)
+      await expect(
+        access(
+          path.join(privateDirectory, pool.userProfile.picture_storage_key),
+        ),
+      ).resolves.toBeUndefined()
+      const served = await request(app)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookie)
       expect(served.status).toBe(200)
       expect(served.headers["content-type"]).toContain("image/jpeg")
       expect(served.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
@@ -1651,19 +2770,24 @@ describe("Express authentication and authorization", () => {
         .set("Origin", origin)
         .set("Cookie", cookie)
         .field("targetUserId", "another-user")
-        .attach("picture", Buffer.from([
-          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-          0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-          0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        ]), {
-          filename: "replacement.png",
-          contentType: "image/png",
-        })
+        .attach(
+          "picture",
+          Buffer.from([
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+          ]),
+          {
+            filename: "replacement.png",
+            contentType: "image/png",
+          },
+        )
       expect(replaced.status).toBe(200)
       expect(pool.userProfile.picture_mime_type).toBe("image/png")
       expect(pool.userProfile.picture_storage_key).not.toBe(oldStorageKey)
-      await expect(access(path.join(privateDirectory, oldStorageKey))).rejects.toMatchObject({ code: "ENOENT" })
-
+      await expect(
+        access(path.join(privateDirectory, oldStorageKey)),
+      ).rejects.toMatchObject({ code: "ENOENT" })
       const removed = await request(app)
         .delete("/api/me/profile/picture")
         .set("Origin", origin)
@@ -1671,7 +2795,9 @@ describe("Express authentication and authorization", () => {
       expect(removed.status).toBe(204)
       expect(pool.userProfile.picture_storage_key).toBeNull()
       expect(pool.userProfile.picture_mime_type).toBeNull()
-      const unavailable = await request(app).get("/api/me/profile/picture").set("Cookie", cookie)
+      const unavailable = await request(app)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookie)
       expect(unavailable.status).toBe(404)
 
       const unsupported = await request(app)
@@ -1708,10 +2834,171 @@ describe("Express authentication and authorization", () => {
       await rm(privateDirectory, { recursive: true, force: true })
     }
   })
-
+  it("shows approved counselor photos publicly and registered participant photos only to assigned conversation partners", async () => {
+    const pool = new FakePool()
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherd-visible-profile-test-"),
+    )
+    const pictureKey = "a".repeat(64)
+    const image = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
+    try {
+      await writeFile(path.join(privateDirectory, pictureKey), image)
+      pool.counselorDirectory = [
+        {
+          public_id: "CO-23456789",
+          display_name: "Approved Counselor",
+          headline: "Family counselor",
+          bio: "Public introduction",
+          areas: ["Family support"],
+          languages: ["English"],
+          picture_storage_key: pictureKey,
+          profile_updated_at: "2026-10-10T07:00:00.000Z",
+        },
+      ]
+      pool.publicCounselorPicture = {
+        public_id: "CO-23456789",
+        picture_storage_key: pictureKey,
+        picture_mime_type: "image/jpeg",
+        approved: true,
+        active: true,
+      }
+      const app = createApp({
+        pool,
+        allowedOrigins: origin,
+        secureCookies: false,
+        privateDocumentPath: privateDirectory,
+      })
+      const directory = await request(app).get("/api/counselors")
+      expect(directory.status).toBe(200)
+      expect(directory.body.counselors[0]).toMatchObject({
+        publicId: "CO-23456789",
+        displayName: "Approved Counselor",
+        pictureUrl:
+          "/counselors/CO-23456789/picture?v=2026-10-10T07%3A00%3A00.000Z",
+      })
+      expect(JSON.stringify(directory.body)).not.toContain(pictureKey)
+      expect(JSON.stringify(directory.body)).not.toContain("email")
+      const publicPicture = await request(app).get(
+        "/api/counselors/CO-23456789/picture",
+      )
+      expect(publicPicture.status).toBe(200)
+      expect(publicPicture.headers["content-type"]).toContain("image/jpeg")
+      expect(publicPicture.headers["cache-control"]).toContain("public")
+      expect(publicPicture.body).toEqual(image)
+      pool.publicCounselorPicture.approved = false
+      expect(
+        (await request(app).get("/api/counselors/CO-23456789/picture")).status,
+      ).toBe(404)
+      const counselor = {
+        id: "assigned-counselor",
+        public_id: "CO-23456789",
+        account_type: "counselor",
+        role: "counselor",
+        status: "active",
+        display_name: "Approved Counselor",
+      }
+      const seeker = {
+        id: "registered-seeker",
+        public_id: "SC-23456789",
+        account_type: "registered",
+        role: "registered",
+        status: "active",
+        display_name: "Registered Seeker",
+      }
+      pool.user = counselor
+      pool.users.set(seeker.id, seeker)
+      pool.userProfiles.set(seeker.id, {
+        picture_storage_key: pictureKey,
+        picture_mime_type: "image/jpeg",
+        updated_at: "2026-10-10T07:00:00.000Z",
+      })
+      pool.conversation = {
+        id: "conversation-id",
+        public_id: "CV-23456789",
+        seeker_id: seeker.id,
+        counselor_id: counselor.id,
+        status: "open",
+      }
+      pool.conversations = [
+        {
+          public_id: "CV-23456789",
+          status: "open",
+          updated_at: "2026-10-10T07:00:00.000Z",
+          other_party_public_id: seeker.public_id,
+          other_party_display_name: seeker.display_name,
+          other_party_account_type: "registered",
+          picture_storage_key: pictureKey,
+          other_party_profile_updated_at: "2026-10-10T07:00:00.000Z",
+        },
+      ]
+      const counselorToken = createSessionToken()
+      pool.sessions.set(hashSessionToken(counselorToken).toString("hex"), {
+        revoked: false,
+        user: counselor,
+      })
+      const counselorCookie = `sc_session=${counselorToken}`
+      const conversations = await request(app)
+        .get("/api/conversations")
+        .set("Cookie", counselorCookie)
+      expect(conversations.body.conversations[0]).toMatchObject({
+        other_party_display_name: "Registered Seeker",
+        other_party_is_anonymous: false,
+        other_party_picture_url:
+          "/conversations/CV-23456789/other-party-picture?v=2026-10-10T07%3A00%3A00.000Z",
+      })
+      const assignedPicture = await request(app)
+        .get("/api/conversations/CV-23456789/other-party-picture")
+        .set("Cookie", counselorCookie)
+      expect(assignedPicture.status).toBe(200)
+      expect(assignedPicture.headers["cache-control"]).toBe("private, no-store")
+      expect(assignedPicture.body).toEqual(image)
+      const unrelated = {
+        ...seeker,
+        id: "unrelated-user",
+        public_id: "SC-87654321",
+      }
+      const unrelatedToken = createSessionToken()
+      pool.sessions.set(hashSessionToken(unrelatedToken).toString("hex"), {
+        revoked: false,
+        user: unrelated,
+      })
+      expect(
+        (
+          await request(app)
+            .get("/api/conversations/CV-23456789/other-party-picture")
+            .set("Cookie", `sc_session=${unrelatedToken}`)
+        ).status,
+      ).toBe(404)
+      seeker.account_type = "anonymous"
+      pool.conversations[0] = {
+        ...pool.conversations[0],
+        other_party_display_name: seeker.public_id,
+        other_party_account_type: "anonymous",
+      }
+      const anonymousConversation = await request(app)
+        .get("/api/conversations")
+        .set("Cookie", counselorCookie)
+      expect(anonymousConversation.body.conversations[0]).toMatchObject({
+        other_party_display_name: "SC-23456789",
+        other_party_is_anonymous: true,
+        other_party_picture_url: null,
+      })
+      expect(
+        (
+          await request(app)
+            .get("/api/conversations/CV-23456789/other-party-picture")
+            .set("Cookie", counselorCookie)
+        ).status,
+      ).toBe(404)
+    } finally {
+      await rm(privateDirectory, { recursive: true, force: true })
+    }
+  })
   it("accepts an optional registration picture and keeps it owner-private", async () => {
     const pool = new FakePool()
-    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherd-registration-picture-test-"))
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherd-registration-picture-test-"),
+    )
     const app = createApp({
       pool,
       allowedOrigins: origin,
@@ -1723,12 +3010,15 @@ describe("Express authentication and authorization", () => {
       const created = await request(app)
         .post("/api/auth/register")
         .set("Origin", origin)
-        .field("profile", JSON.stringify({
-          email: "registered-picture@example.com",
-          displayName: "Registered Picture",
-          password: "a-long-secure-password",
-          consent: true,
-        }))
+        .field(
+          "profile",
+          JSON.stringify({
+            email: "registered-picture@example.com",
+            displayName: "Registered Picture",
+            password: "a-long-secure-password",
+            consent: true,
+          }),
+        )
         .attach("profilePicture", Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
           filename: "picture.jpg",
           contentType: "image/jpeg",
@@ -1806,7 +3096,9 @@ describe("Express authentication and authorization", () => {
         })
       expect(unauthorizedReplacement.status).toBe(404)
       expect(pool.userProfile.picture_storage_key).toMatch(/^[a-f0-9]{64}$/)
-      expect((await request(app).get("/api/me/profile/picture")).status).toBe(401)
+      expect((await request(app).get("/api/me/profile/picture")).status).toBe(
+        401,
+      )
     } finally {
       await rm(privateDirectory, { recursive: true, force: true })
     }
@@ -1814,7 +3106,9 @@ describe("Express authentication and authorization", () => {
 
   it("allows counselor registration with a profile picture and no supporting documents", async () => {
     const pool = new FakePool()
-    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherd-counselor-picture-test-"))
+    const privateDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "shepherd-counselor-picture-test-"),
+    )
     const app = createApp({
       pool,
       allowedOrigins: origin,
@@ -1844,7 +3138,9 @@ describe("Express authentication and authorization", () => {
       expect(picture.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
 
       const approved = await request(app)
-        .patch(`/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`)
+        .patch(
+          `/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`,
+        )
         .set("Origin", origin)
         .set("Cookie", addSuperAdmin(pool))
         .send({ action: "APPROVED" })
@@ -1857,7 +3153,11 @@ describe("Express authentication and authorization", () => {
 
   it("denies writes from unapproved origins and denies SuperAdmin access to conversations", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     const missingOrigin = await request(app)
       .post("/api/auth/anonymous")
       .send({ password: "a-long-private-password" })
@@ -1872,7 +3172,9 @@ describe("Express authentication and authorization", () => {
       display_name: "Admin",
     }
     const token = createSessionToken()
-    pool.sessions.set(hashSessionToken(token).toString("hex"), { revoked: false })
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+    })
     pool.conversation = {
       id: "conversation-id",
       public_id: "CV-23456789",
@@ -1885,14 +3187,19 @@ describe("Express authentication and authorization", () => {
       .get("/api/conversations/CV-23456789/messages")
       .set("Cookie", cookie)
     expect(messages.status).toBe(404)
-
-    const requests = await request(app).get("/api/requests").set("Cookie", cookie)
+    const requests = await request(app)
+      .get("/api/requests")
+      .set("Cookie", cookie)
     expect(requests.status).toBe(403)
   })
 
   it("permits only the counselor assigned to a conversation", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     pool.user = {
       id: "other-counselor",
       public_id: "SC-23456789",
@@ -1902,7 +3209,9 @@ describe("Express authentication and authorization", () => {
       display_name: "Counselor",
     }
     const token = createSessionToken()
-    pool.sessions.set(hashSessionToken(token).toString("hex"), { revoked: false })
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+    })
     pool.conversation = {
       id: "conversation-id",
       public_id: "CV-23456789",
@@ -1918,7 +3227,11 @@ describe("Express authentication and authorization", () => {
 
   it("returns persisted conversation history to its participants with privacy-safe sender labels", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     pool.user = {
       id: "assigned-counselor",
       public_id: "CO-23456789",
@@ -1934,13 +3247,15 @@ describe("Express authentication and authorization", () => {
       counselor_id: "assigned-counselor",
       status: "open",
     }
-    pool.conversations = [{
-      public_id: pool.conversation.public_id,
-      status: "open",
-      updated_at: "2026-10-10T07:00:00.000Z",
-      other_party_public_id: "AN-23456789",
-      other_party_display_name: "AN-23456789",
-    }]
+    pool.conversations = [
+      {
+        public_id: pool.conversation.public_id,
+        status: "open",
+        updated_at: "2026-10-10T07:00:00.000Z",
+        other_party_public_id: "AN-23456789",
+        other_party_display_name: "AN-23456789",
+      },
+    ]
     pool.messages = [
       {
         id: "message-1",
@@ -1970,7 +3285,9 @@ describe("Express authentication and authorization", () => {
       .get("/api/conversations")
       .set("Cookie", cookie)
     expect(conversations.status).toBe(200)
-    expect(conversations.body.conversations[0].other_party_display_name).toBe("AN-23456789")
+    expect(conversations.body.conversations[0].other_party_display_name).toBe(
+      "AN-23456789",
+    )
     expect(pool.lastQuery).toContain(
       "CASE WHEN other.account_type = 'anonymous' THEN other.public_id",
     )
@@ -2003,8 +3320,9 @@ describe("Express authentication and authorization", () => {
       .set("Cookie", cookie)
     expect(refreshedHistory.status).toBe(200)
     expect(refreshedHistory.body.messages).toHaveLength(3)
-    expect(refreshedHistory.body.messages[2].sender_public_id).toBe("CO-23456789")
-
+    expect(refreshedHistory.body.messages[2].sender_public_id).toBe(
+      "CO-23456789",
+    )
     pool.user = {
       id: "unrelated-user",
       public_id: "AN-99999999",
@@ -2024,7 +3342,11 @@ describe("Express authentication and authorization", () => {
 
   it("authorizes message edits, participant-only hiding, global deletion, and read receipts", async () => {
     const pool = new FakePool()
-    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+    })
     pool.user = {
       id: "assigned-counselor",
       public_id: "CO-23456789",
@@ -2108,8 +3430,11 @@ describe("Express authentication and authorization", () => {
       .get("/api/conversations/CV-23456789/messages")
       .set("Cookie", cookie)
     expect(otherParticipantHistory.status).toBe(200)
-    expect(otherParticipantHistory.body.messages.some((item) => item.id === otherMessageId)).toBe(true)
-
+    expect(
+      otherParticipantHistory.body.messages.some(
+        (item) => item.id === otherMessageId,
+      ),
+    ).toBe(true)
     pool.user = {
       id: "assigned-counselor",
       public_id: "CO-23456789",
@@ -2154,5 +3479,112 @@ describe("Express authentication and authorization", () => {
       .set("Cookie", cookie)
       .send({ messageIds: [otherMessageId], state: "delivered" })
     expect(deliveryReceipt.status).toBe(200)
+  })
+})
+
+describe("counselor disciples and admin analytics", () => {
+  it("limits a counselor's disciples list to assigned counseling relationships and pseudonymizes anonymous people", async () => {
+    const pool = new FakePool()
+    const counselor = {
+      id: "assigned-counselor",
+      public_id: "CO-23456789",
+      account_type: "counselor",
+      role: "counselor",
+      status: "active",
+    }
+    pool.user = counselor
+    const token = createSessionToken()
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+      user: counselor,
+    })
+    pool.disciples = [{
+      seeker_public_id: "AN-23456789",
+      is_anonymous: true,
+      display_name: "AN-23456789",
+      counseling_count: 1,
+      conversation_count: 1,
+      open_conversations: 1,
+      last_activity_at: "2026-10-10T12:00:00.000Z",
+      has_active_counseling: true,
+      support_categories: ["Prayer & spiritual growth"],
+    }]
+    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const response = await request(app)
+      .get("/api/counselor/disciples")
+      .set("Cookie", `sc_session=${token}`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.disciples).toHaveLength(1)
+    expect(response.body.disciples[0]).toMatchObject({
+      seeker_public_id: "AN-23456789",
+      is_anonymous: true,
+      display_name: "AN-23456789",
+      open_conversations: 1,
+    })
+    expect(response.body.disciples[0]).not.toHaveProperty("topic")
+    expect(response.body.disciples[0]).not.toHaveProperty("message")
+    expect(pool.lastQuery).toContain("WHERE r.counselor_id = $1 AND r.status IN ('Accepted', 'Closed')")
+  })
+
+  it("returns privacy-protected analytics with cohort suppression and validates periods", async () => {
+    const pool = new FakePool()
+    const cookie = addSuperAdmin(pool)
+    pool.analyticsMetrics = {
+      total_accounts: 20,
+      active_accounts: 18,
+      new_accounts: 4,
+      active_counselors: 6,
+      new_requests: 12,
+      pending_requests: 3,
+      accepted_requests: 7,
+      declined_requests: 2,
+      open_conversations: 5,
+      messages_sent: 44,
+      completed_journey_stages: 9,
+    }
+    pool.analyticsTrends = [{
+      bucket: 0,
+      bucket_start: "2026-09-10T00:00:00.000Z",
+      bucket_end: "2026-09-14T00:00:00.000Z",
+      new_accounts: 5,
+      new_requests: 4,
+      new_conversations: 6,
+      completed_stages: 2,
+    }]
+    pool.analyticsStatuses = [
+      { status: "Accepted", total: 7 },
+      { status: "Pending", total: 3 },
+    ]
+    pool.analyticsCategories = [
+      { label: "Prayer & spiritual growth", total: 8 },
+      { label: "Relationships / marriage", total: 2 },
+    ]
+    pool.analyticsJourney = [
+      { stage: "Come", status: "completed", total: 8 },
+      { stage: "Come", status: "in_progress", total: 2 },
+    ]
+    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const response = await request(app)
+      .get("/api/admin/analytics?days=30")
+      .set("Cookie", cookie)
+
+    expect(response.status).toBe(200)
+    expect(response.body.periodDays).toBe(30)
+    expect(response.body.minimumCohort).toBe(5)
+    expect(response.body.metrics.new_accounts).toEqual({ value: null, suppressed: true })
+    expect(response.body.metrics.accepted_requests).toEqual({ value: 7, suppressed: false })
+    expect(response.body.supportCategories).toEqual([
+      { label: "Prayer & spiritual growth", total: { value: 8, suppressed: false } },
+    ])
+    expect(response.body.requestStatuses.Pending).toEqual({ value: null, suppressed: true })
+    expect(response.body.trends).toHaveLength(1)
+    expect(response.body).not.toHaveProperty("messages")
+    expect(JSON.stringify(response.body)).not.toContain("message body")
+
+    const invalidPeriod = await request(app)
+      .get("/api/admin/analytics?days=365")
+      .set("Cookie", cookie)
+    expect(invalidPeriod.status).toBe(400)
   })
 })
