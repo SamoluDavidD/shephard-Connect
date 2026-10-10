@@ -3,7 +3,7 @@ Deno.env.set("SUPABASE_ANON_KEY", "test-anon-key");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key");
 Deno.env.set("APP_ORIGINS", "https://shepherdconnect.example");
 
-const { app } = await import("./index.ts");
+const { app, handleRequest } = await import("./index.ts");
 
 Deno.test("health endpoint is available without authentication", async () => {
   const response = await app.request("/health");
@@ -11,6 +11,21 @@ Deno.test("health endpoint is available without authentication", async () => {
 
   if (response.status !== 200 || body.status !== "ok") {
     throw new Error("Expected unauthenticated health check to return 200.");
+  }
+});
+
+Deno.test("deployed function URL prefixes are removed before routing", async () => {
+  for (
+    const path of [
+      "https://project.example/functions/v1/api/health",
+      "https://project.example/api/health",
+    ]
+  ) {
+    const response = await handleRequest(new Request(path));
+    const body = await response.json();
+    if (response.status !== 200 || body.status !== "ok") {
+      throw new Error(`Expected ${path} to route to the health endpoint.`);
+    }
   }
 });
 

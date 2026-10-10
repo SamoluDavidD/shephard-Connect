@@ -1117,6 +1117,20 @@ app.post(
   },
 );
 
+export function handleRequest(request: Request): Response | Promise<Response> {
+  const url = new URL(request.url);
+  const functionPrefix = "/functions/v1/api";
+  if (
+    url.pathname === functionPrefix ||
+    url.pathname.startsWith(`${functionPrefix}/`)
+  ) {
+    url.pathname = url.pathname.slice(functionPrefix.length) || "/";
+  } else if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+    url.pathname = url.pathname.slice("/api".length) || "/";
+  }
+  return app.fetch(new Request(url, request));
+}
+
 if (import.meta.main) {
-  Deno.serve(app.fetch);
+  Deno.serve(handleRequest);
 }
