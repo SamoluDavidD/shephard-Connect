@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import Icon from "./Icon.vue"
-
 withDefaults(defineProps<{ compact?: boolean }>(), { compact: false })
 </script>
 
 <template>
   <div class="brand">
-    <span class="brand-mark" aria-hidden="true">
-      <Icon name="Leaf" :size="compact ? 19 : 22" />
-    </span>
+    <img
+      class="brand-mark"
+      :class="{ 'brand-mark-compact': compact }"
+      src="/LOGO.png"
+      alt=""
+    />
     <span :class="compact ? 'brand-name brand-name-sm' : 'brand-name'">
       ShepherdConnect
     </span>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { counselors, journeyStages, needs } from "./data"
 import { api, apiUrl, type AccountUser, type AuthResponse } from "./lib/api"
@@ -21,7 +21,7 @@ type CounselorApplicationSummary = {
   status: string
   fullLegalName: string
   preferredDisplayName: string
-  professionalTitle: string
+  professionalTitle: string | null
   specialization: string
   submittedAt: string
   publicId: string
@@ -37,27 +37,35 @@ type CounselorApplicationDocument = {
   uploadedAt: string | null
   requestedAt: string | null
 }
+type CounselorProfileDocument = {
+  id: string
+  category: string
+  status: "requested" | "uploaded"
+  original_name: string | null
+  byte_size: number | null
+  uploaded_at: string | null
+}
 type CounselorApplicationDetail = CounselorApplicationSummary & {
   updatedAt: string
   email: string
   displayName: string | null
   phone: string | null
-  country: string
-  generalLocation: string
-  highestQualification: string
-  institution: string
-  qualificationType: string
+  country: string | null
+  generalLocation: string | null
+  highestQualification: string | null
+  institution: string | null
+  qualificationType: string | null
   completionYear: number | null
-  certifications: string
-  yearsExperience: number
+  certifications: string | null
+  yearsExperience: number | null
   licenseNumber: string | null
   licensingAuthority: string | null
   licenseExpiry: string | null
-  biography: string
+  biography: string | null
   areasOfExpertise: string[]
   languages: string[]
-  workHistory: string
-  referencesText: string
+  workHistory: string | null
+  referencesText: string | null
   codeOfConductAccepted: boolean
   confidentialityAccepted: boolean
   safeguardingAccepted: boolean
@@ -169,6 +177,23 @@ const postAuthPath = ref("")
 const recoveryCopied = ref(false)
 const profileStatus = ref("")
 const profileLoading = ref(false)
+const displayNameDraft = ref("")
+const currentPassword = ref("")
+const newAccountPassword = ref("")
+const confirmAccountPassword = ref("")
+const passwordStatus = ref("")
+const passwordLoading = ref(false)
+const homepageImageUrl = ref<string | null>(null)
+const homepageImageUpdatedAt = ref<string | null>(null)
+const homepageImageAlt = ref("")
+const homepageImageAltDraft = ref("")
+const homepageImageFile = ref<File | null>(null)
+const homepageImagePreview = ref<string | null>(null)
+const homepageImageInput = ref<HTMLInputElement | null>(null)
+const homepageSettingsStatus = ref("")
+const homepageSettingsError = ref("")
+const homepageSettingsLoading = ref(false)
+const homepageSettingsSaving = ref(false)
 const upgradeName = ref("")
 const upgradeEmail = ref("")
 const upgradePassword = ref("")
@@ -177,6 +202,21 @@ const counselorHeadline = ref("")
 const counselorBio = ref("")
 const counselorAreas = ref("")
 const counselorLanguages = ref("")
+const counselorProfessionalTitle = ref("")
+const counselorHighestQualification = ref("")
+const counselorInstitution = ref("")
+const counselorQualificationType = ref("")
+const counselorCompletionYear = ref("")
+const counselorCertifications = ref("")
+const counselorYearsExperience = ref("")
+const counselorLicenseNumber = ref("")
+const counselorLicensingAuthority = ref("")
+const counselorLicenseExpiry = ref("")
+const counselorWorkHistory = ref("")
+const counselorReferences = ref("")
+const counselorProfileDocuments = ref<CounselorProfileDocument[]>([])
+const counselorDocumentStatus = ref("")
+const counselorProfileApplicationRef = ref("")
 const chatError = ref("")
 const counselorCases = ref<Array<Record<string, string | null>>>([])
 const realConversations = ref<Array<Record<string, string | null>>>([])
@@ -318,11 +358,11 @@ const resources = [
 ]
 const adminTabs = ["Counselor Applications", "Counselors", "Users", "Resources", "Safeguarding", "Settings"]
 const adminTabDescriptions: Record<string, string> = {
-  "Counselor Applications": "Review applicant-submitted details, verify credentials, and record approval decisions.",
+  "Counselor Applications": "Review essential profile information and approve access; verify optional credentials separately when provided.",
   Users: "Manage account status without routine access to counseling content.",
   Resources: "Approve Scripture references and discipleship resources before sharing.",
   Safeguarding: "Restricted case triage requires a separate safeguarding permission.",
-  Settings: "Configure approved policy values after GCML sign-off.",
+  Settings: "Manage public homepage artwork and permitted site configuration.",
 }
 const reportBars = [
   { label: "Week 1", total: 42, accepted: 30 },
@@ -339,6 +379,12 @@ const reportNeeds = [
 
 function go(path: string) {
   void router.push(path)
+}
+
+function counselorProfileDocumentUrl(document: CounselorProfileDocument) {
+  return apiUrl(
+    `/counselor/applications/${encodeURIComponent(counselorProfileApplicationRef.value)}/documents/${encodeURIComponent(document.id)}`,
+  )
 }
 
 function homeFor(user: AccountUser | null = account.user) {
@@ -639,18 +685,46 @@ async function loadAccountData() {
       api<{ cases: Array<Record<string, string | null>> }>("/counselor/cases"),
       api<{ conversations: Array<Record<string, string | null>> }>("/conversations"),
       api<{ profile: {
+        public_ref: string
         headline: string
         bio: string
         areas: string[]
         languages: string[]
+        professional_title: string | null
+        highest_qualification: string | null
+        institution: string | null
+        qualification_type: string | null
+        completion_year: number | null
+        certifications: string | null
+        years_experience: number | null
+        license_number: string | null
+        licensing_authority: string | null
+        license_expiry: string | null
+        work_history: string | null
+        references_text: string | null
+        documents: CounselorProfileDocument[]
       } }>("/counselor/profile"),
     ])
     counselorCases.value = caseResult.cases
     realConversations.value = conversationResult.conversations
     counselorHeadline.value = profileResult.profile.headline
+    counselorProfileApplicationRef.value = profileResult.profile.public_ref
     counselorBio.value = profileResult.profile.bio
     counselorAreas.value = profileResult.profile.areas.join(", ")
     counselorLanguages.value = profileResult.profile.languages.join(", ")
+    counselorProfessionalTitle.value = profileResult.profile.professional_title || ""
+    counselorHighestQualification.value = profileResult.profile.highest_qualification || ""
+    counselorInstitution.value = profileResult.profile.institution || ""
+    counselorQualificationType.value = profileResult.profile.qualification_type || ""
+    counselorCompletionYear.value = profileResult.profile.completion_year?.toString() || ""
+    counselorCertifications.value = profileResult.profile.certifications || ""
+    counselorYearsExperience.value = profileResult.profile.years_experience?.toString() || ""
+    counselorLicenseNumber.value = profileResult.profile.license_number || ""
+    counselorLicensingAuthority.value = profileResult.profile.licensing_authority || ""
+    counselorLicenseExpiry.value = profileResult.profile.license_expiry || ""
+    counselorWorkHistory.value = profileResult.profile.work_history || ""
+    counselorReferences.value = profileResult.profile.references_text || ""
+    counselorProfileDocuments.value = profileResult.profile.documents
     const conversation = conversationResult.conversations[0]
     currentConversation.value = conversation
       ? {
@@ -763,12 +837,164 @@ async function toggleSafeguardingPermission(user: (typeof realAdminUsers.value)[
 
 async function changeAdminTab(tab: string) {
   adminTab.value = tab
-  if (account.user?.role !== "superadmin" || state.demo) return
+}
+
+async function loadHomepageSettings() {
+  const result = await api<{
+    homepageImageUrl: string | null
+    homepageImageUpdatedAt: string | null
+    homepageImageAlt: string
+  }>("/site-settings")
+  homepageImageUrl.value = result.homepageImageUrl
+  homepageImageUpdatedAt.value = result.homepageImageUpdatedAt
+  homepageImageAlt.value = result.homepageImageAlt
+  homepageImageAltDraft.value = result.homepageImageAlt
+}
+
+async function loadAdminSiteSettings() {
+  homepageSettingsLoading.value = true
+  homepageSettingsError.value = ""
   try {
-    if (tab === "Counselor Applications") await loadAdminApplications()
-    else await loadAdminUsers(tab === "Counselors" ? "counselor" : undefined)
+    const result = await api<{
+      homepageImageUrl: string | null
+      homepageImageType: string | null
+      homepageImageUpdatedAt: string | null
+      homepageImageAlt: string
+    }>("/admin/site-settings")
+    homepageImageUrl.value = result.homepageImageUrl
+    homepageImageUpdatedAt.value = result.homepageImageUpdatedAt
+    homepageImageAlt.value = result.homepageImageAlt
+    homepageImageAltDraft.value = result.homepageImageAlt
+    homepageSettingsStatus.value = ""
+    clearHomepageImagePreview()
   } catch (error) {
-    account.error = error instanceof Error ? error.message : "Accounts could not be loaded."
+    homepageSettingsError.value =
+      error instanceof Error ? error.message : "Site settings could not be loaded."
+  } finally {
+    homepageSettingsLoading.value = false
+  }
+}
+
+function clearHomepageImagePreview() {
+  if (homepageImagePreview.value) URL.revokeObjectURL(homepageImagePreview.value)
+  homepageImagePreview.value = null
+  homepageImageFile.value = null
+  if (homepageImageInput.value) homepageImageInput.value.value = ""
+}
+
+function selectHomepageImage(event: Event) {
+  homepageSettingsStatus.value = ""
+  homepageSettingsError.value = ""
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    clearHomepageImagePreview()
+    homepageSettingsError.value = "Choose a JPEG, PNG, or WebP image."
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    clearHomepageImagePreview()
+    homepageSettingsError.value = "Choose an image that is 5 MB or smaller."
+    return
+  }
+  clearHomepageImagePreview()
+  homepageImageFile.value = file
+  homepageImagePreview.value = URL.createObjectURL(file)
+}
+
+async function saveHomepageImage() {
+  if (!homepageImageFile.value) return
+  homepageSettingsSaving.value = true
+  homepageSettingsError.value = ""
+  homepageSettingsStatus.value = ""
+  try {
+    const form = new FormData()
+    form.append("homepageImage", homepageImageFile.value)
+    form.append("homepageImageAlt", homepageImageAltDraft.value.trim())
+    const result = await api<{
+      homepageImageUrl: string
+      homepageImageUpdatedAt: string
+      homepageImageAlt: string
+    }>("/admin/site-settings/homepage-image", { method: "POST", body: form })
+    homepageImageUrl.value = result.homepageImageUrl
+    homepageImageUpdatedAt.value = result.homepageImageUpdatedAt
+    homepageImageAlt.value = result.homepageImageAlt
+    homepageImageAltDraft.value = result.homepageImageAlt
+    homepageSettingsStatus.value = "Homepage image updated."
+    clearHomepageImagePreview()
+  } catch (error) {
+    homepageSettingsError.value =
+      error instanceof Error ? error.message : "Homepage image could not be saved."
+  } finally {
+    homepageSettingsSaving.value = false
+  }
+}
+
+async function removeHomepageImage() {
+  homepageSettingsSaving.value = true
+  homepageSettingsError.value = ""
+  homepageSettingsStatus.value = ""
+  try {
+    await api<void>("/admin/site-settings/homepage-image", { method: "DELETE" })
+    homepageImageUrl.value = null
+    homepageImageUpdatedAt.value = null
+    homepageImageAlt.value = ""
+    homepageImageAltDraft.value = ""
+    clearHomepageImagePreview()
+    homepageSettingsStatus.value = "Homepage image removed. The default artwork is showing."
+  } catch (error) {
+    homepageSettingsError.value =
+      error instanceof Error ? error.message : "Homepage image could not be removed."
+  } finally {
+    homepageSettingsSaving.value = false
+  }
+}
+
+async function saveDisplayName() {
+  profileLoading.value = true
+  profileStatus.value = ""
+  try {
+    const displayName = displayNameDraft.value.trim() || null
+    const result = await api<{ user: AccountUser }>("/me", {
+      method: "PATCH",
+      body: JSON.stringify({ displayName }),
+    })
+    setAccountUser(result.user)
+    profileStatus.value = "Account profile updated."
+  } catch (error) {
+    profileStatus.value =
+      error instanceof Error ? error.message : "Account profile could not be saved."
+  } finally {
+    profileLoading.value = false
+  }
+}
+
+async function changeAccountPassword() {
+  passwordLoading.value = true
+  passwordStatus.value = ""
+  if (newAccountPassword.value !== confirmAccountPassword.value) {
+    passwordStatus.value = "The new passwords do not match."
+    passwordLoading.value = false
+    return
+  }
+  try {
+    await api("/me/password", {
+      method: "PATCH",
+      body: JSON.stringify({
+        currentPassword: currentPassword.value,
+        newPassword: newAccountPassword.value,
+      }),
+    })
+    currentPassword.value = ""
+    newAccountPassword.value = ""
+    confirmAccountPassword.value = ""
+    passwordStatus.value = "Password updated. Other signed-in sessions were revoked."
+  } catch (error) {
+    passwordStatus.value =
+      error instanceof Error ? error.message : "Password could not be updated."
+  } finally {
+    passwordLoading.value = false
   }
 }
 
@@ -776,20 +1002,73 @@ async function saveCounselorProfile() {
   profileLoading.value = true
   profileStatus.value = ""
   try {
+    const displayName = displayNameDraft.value.trim()
     await api("/counselor/profile", {
       method: "PATCH",
       body: JSON.stringify({
-        displayName: account.user?.displayName || account.user?.publicId,
+        displayName: displayName || account.user?.publicId,
         headline: counselorHeadline.value,
         bio: counselorBio.value,
         areas: counselorAreas.value.split(",").map((value) => value.trim()).filter(Boolean),
         languages: counselorLanguages.value.split(",").map((value) => value.trim()).filter(Boolean),
+        professionalTitle: counselorProfessionalTitle.value || null,
+        highestQualification: counselorHighestQualification.value || null,
+        institution: counselorInstitution.value || null,
+        qualificationType: counselorQualificationType.value || null,
+        completionYear: counselorCompletionYear.value ? Number(counselorCompletionYear.value) : null,
+        certifications: counselorCertifications.value || null,
+        yearsExperience: counselorYearsExperience.value ? Number(counselorYearsExperience.value) : null,
+        licenseNumber: counselorLicenseNumber.value || null,
+        licensingAuthority: counselorLicensingAuthority.value || null,
+        licenseExpiry: counselorLicenseExpiry.value || null,
+        workHistory: counselorWorkHistory.value || null,
+        referencesText: counselorReferences.value || null,
       }),
     })
+    if (account.user) {
+      setAccountUser({ ...account.user, displayName: displayName || account.user.publicId })
+    }
     profileStatus.value = "Counselor profile updated."
     await loadCounselors()
   } catch (error) {
     profileStatus.value = error instanceof Error ? error.message : "Counselor profile could not be saved."
+  } finally {
+    profileLoading.value = false
+  }
+}
+
+async function uploadCounselorProfileDocuments(event: Event) {
+  const form = event.currentTarget
+  if (!(form instanceof HTMLFormElement)) return
+  const payload = new FormData()
+  for (const inputName of [
+    "qualificationDocuments",
+    "licenseDocuments",
+    "supportingDocuments",
+    "profilePhoto",
+  ]) {
+    const input = form.elements.namedItem(inputName)
+    if (!(input instanceof HTMLInputElement) || !input.files) continue
+    for (const file of input.files) payload.append(inputName, file)
+  }
+  if (![...payload.keys()].length) {
+    counselorDocumentStatus.value = "Select at least one file to upload."
+    return
+  }
+
+  profileLoading.value = true
+  counselorDocumentStatus.value = ""
+  try {
+    const result = await api<{ documents: CounselorProfileDocument[] }>(
+      "/counselor/profile/documents",
+      { method: "POST", body: payload },
+    )
+    counselorProfileDocuments.value = [...counselorProfileDocuments.value, ...result.documents]
+    counselorDocumentStatus.value = "Profile documents uploaded."
+    form.reset()
+  } catch (error) {
+    counselorDocumentStatus.value =
+      error instanceof Error ? error.message : "Profile documents could not be uploaded."
   } finally {
     profileLoading.value = false
   }
@@ -857,6 +1136,10 @@ async function loadMessages(conversationPublicId: string) {
 }
 
 onMounted(async () => {
+  void loadHomepageSettings().catch((error) => {
+    homepageSettingsError.value =
+      error instanceof Error ? error.message : "Homepage settings could not be loaded."
+  })
   try {
     await refreshAccount()
     if (account.user) {
@@ -891,7 +1174,10 @@ watch(
     if (name === "admin" && account.user.role === "superadmin") {
       try {
         if (adminTab.value === "Counselor Applications") await loadAdminApplications()
-        else await loadAdminUsers(adminTab.value === "Counselors" ? "counselor" : undefined)
+        else if (adminTab.value === "Settings") await loadAdminSiteSettings()
+        else if (["Counselors", "Users", "Safeguarding"].includes(adminTab.value)) {
+          await loadAdminUsers(adminTab.value === "Counselors" ? "counselor" : undefined)
+        }
       } catch (error) {
         account.error = error instanceof Error ? error.message : "Accounts could not be loaded."
       }
@@ -916,17 +1202,32 @@ watch(
   },
 )
 
+onBeforeUnmount(() => {
+  if (homepageImagePreview.value) URL.revokeObjectURL(homepageImagePreview.value)
+})
+
 watch(adminTab, (tab) => {
   if (route.name === "admin" && account.user?.role === "superadmin" && !state.demo) {
-    const loading =
-      tab === "Counselor Applications"
-        ? loadAdminApplications()
-        : loadAdminUsers(tab === "Counselors" ? "counselor" : undefined)
+    const loading = tab === "Counselor Applications"
+      ? loadAdminApplications()
+      : tab === "Settings"
+        ? loadAdminSiteSettings()
+        : ["Counselors", "Users", "Safeguarding"].includes(tab)
+          ? loadAdminUsers(tab === "Counselors" ? "counselor" : undefined)
+          : Promise.resolve()
     void loading.catch((error) => {
       account.error = error instanceof Error ? error.message : "Accounts could not be loaded."
     })
   }
 })
+
+watch(
+  () => account.user?.displayName,
+  (displayName) => {
+    displayNameDraft.value = displayName || ""
+  },
+  { immediate: true },
+)
 
 watch(accountType, () => {
   accountName.value = ""
@@ -1077,27 +1378,34 @@ async function submitAuth() {
   }
 }
 
-async function submitCounselorApplication(payload: FormData) {
+async function submitCounselorApplication(payload: FormData, existingAccount = false) {
   authLoading.value = true
   authStatus.value = ""
   recoveryCode.value = ""
   try {
-    const result = await api<AuthResponse>("/auth/counselor", {
-      method: "POST",
-      body: payload,
-    })
+    const result = await api<AuthResponse>(
+      existingAccount ? "/counselor/applications" : "/auth/counselor",
+      {
+        method: "POST",
+        body: existingAccount ? String(payload.get("application") || "{}") : payload,
+      },
+    )
     setAccountUser(result.user)
     setDemo(false)
     localStorage.removeItem("sc-demo")
     resetDemo()
-    postAuthPath.value = "/counselor-application"
-    authStatus.value =
-      result.recoveryCodeWarning ||
-      "Application submitted. Counselor access remains unavailable until approval."
-    recoveryCode.value = result.recoveryCode || ""
-    recoveryCopied.value = false
     await refreshAccount()
-    await loadCounselorApplication()
+    if (existingAccount) {
+      go("/counselor-application")
+    } else {
+      postAuthPath.value = "/counselor-application"
+      authStatus.value =
+        result.recoveryCodeWarning ||
+        "Application submitted. Counselor access remains unavailable until approval."
+      recoveryCode.value = result.recoveryCode || ""
+      recoveryCopied.value = false
+      await loadCounselorApplication()
+    }
   } catch (error) {
     authStatus.value =
       error instanceof Error ? error.message : "The counselor application could not be submitted."
@@ -1260,13 +1568,18 @@ function counselorInitials(name: string) {
         </div>
         <p class="microcopy"><Icon name="LockKeyhole" :size="15" /> Your privacy choice comes before we ask for personal details.</p>
       </div>
-      <div class="hero-visual" aria-label="Counsel, guide, disciple">
+      <div
+        class="hero-visual"
+        :class="{ 'hero-visual-photo': homepageImageUrl }"
+        aria-label="Counsel, guide, disciple"
+      >
+        <img
+          v-if="homepageImageUrl"
+          class="hero-photo"
+          :src="apiUrl(homepageImageUrl)"
+          :alt="homepageImageAlt"
+        />
         <div class="hero-glow" />
-        <div class="hero-card hero-card-main">
-          <span class="counselor-avatar avatar-mint">SK</span>
-          <div><small>Your counselor</small><strong>Sarah K.</strong><p>“You don’t have to carry this alone.”</p></div>
-          <span class="online-dot" />
-        </div>
         <div class="hero-card hero-card-verse">
           <Icon name="BookOpen" :size="20" />
           <div><small>Today’s encouragement</small><strong>Philippians 4:6–7</strong></div>
@@ -1489,7 +1802,7 @@ function counselorInitials(name: string) {
           <Badge tone="warning">{{ counselorApplication.status.replace(/_/g, " ") }}</Badge>
         </div>
         <p v-if="counselorApplication.status === 'PENDING_APPROVAL'">
-          Your application has been received. A SuperAdmin must review your application and verify the required credentials before counselor access can be activated.
+          Your application has been received. A SuperAdmin will review your essential account and profile information before counselor access can be activated. Optional professional credentials can be verified separately.
         </p>
         <p v-else-if="counselorApplication.status === 'UNDER_REVIEW'">
           Your application is being reviewed. You cannot access counselor functions unless the application is approved.
@@ -1681,7 +1994,7 @@ function counselorInitials(name: string) {
           <div class="table-row table-head"><span>Applicant</span><span>Requested role</span><span>Application</span><span>Submitted</span><span /></div>
           <div v-for="application in filteredAdminApplications" :key="application.publicRef" class="table-row">
             <span data-label="Applicant"><b>{{ application.preferredDisplayName }}</b><small>{{ application.fullLegalName }} · {{ application.publicId }}</small></span>
-            <span data-label="Requested role">{{ application.professionalTitle }} · {{ application.specialization }}</span>
+            <span data-label="Requested role">{{ application.professionalTitle ? `${application.professionalTitle} · ` : "" }}{{ application.specialization }}</span>
             <span data-label="Application"><Badge tone="warning">{{ application.status.replace(/_/g, " ") }}</Badge></span>
             <span data-label="Submitted">{{ new Date(application.submittedAt).toLocaleDateString() }}</span>
             <button class="inline-action" @click="openAdminApplication(application.publicRef)">Review</button>
@@ -1699,60 +2012,73 @@ function counselorInitials(name: string) {
       <section v-else-if="adminApplication" class="panel application-review-panel">
         <div class="card-heading">
           <div><span class="section-kicker">Application {{ adminApplication.publicRef }}</span><h2>{{ adminApplication.fullLegalName }}</h2></div>
-          <Badge tone="warning">{{ adminApplication.status.replace(/_/g, " ") }}</Badge>
+          <div class="application-decision-actions">
+            <Badge tone="warning">{{ adminApplication.status.replace(/_/g, " ") }}</Badge>
+            <BaseButton v-if="!['APPROVED', 'REJECTED'].includes(adminApplication.status)" :disabled="adminApplication.accountStatus !== 'active'" @click="submitAdminApplicationReview('APPROVED')">Approve</BaseButton>
+          </div>
         </div>
         <dl class="application-detail-grid">
           <div><dt>Preferred display name</dt><dd>{{ adminApplication.preferredDisplayName }}</dd></div>
           <div><dt>Account / email</dt><dd>{{ adminApplication.publicId }} · {{ adminApplication.email }}</dd></div>
-          <div><dt>Phone</dt><dd>{{ adminApplication.phone || "Not provided" }}</dd></div>
-          <div><dt>Location</dt><dd>{{ adminApplication.generalLocation }}, {{ adminApplication.country }}</dd></div>
-          <div><dt>Professional title</dt><dd>{{ adminApplication.professionalTitle }}</dd></div>
           <div><dt>Specialization</dt><dd>{{ adminApplication.specialization }}</dd></div>
-          <div><dt>Highest qualification (applicant-provided)</dt><dd>{{ adminApplication.highestQualification }} · {{ adminApplication.qualificationType }}, {{ adminApplication.institution }}<span v-if="adminApplication.completionYear"> · {{ adminApplication.completionYear }}</span></dd></div>
-          <div><dt>Experience</dt><dd>{{ adminApplication.yearsExperience }} years</dd></div>
-          <div><dt>Certifications</dt><dd>{{ adminApplication.certifications || "None listed" }}</dd></div>
+          <div><dt>Short biography</dt><dd>{{ adminApplication.biography }}</dd></div>
+        </dl>
+
+        <details class="application-optional-details">
+          <summary>Optional professional details, credentials, and documents</summary>
+          <div class="application-optional-content">
+            <dl class="application-detail-grid">
+              <div><dt>Phone</dt><dd>{{ adminApplication.phone || "Not provided" }}</dd></div>
+              <div><dt>Location</dt><dd>{{ [adminApplication.generalLocation, adminApplication.country].filter(Boolean).join(", ") || "Not provided" }}</dd></div>
+              <div><dt>Professional title</dt><dd>{{ adminApplication.professionalTitle || "Not provided" }}</dd></div>
+          <div><dt>Highest qualification (applicant-provided)</dt><dd>{{ [adminApplication.highestQualification, adminApplication.qualificationType, adminApplication.institution].filter(Boolean).join(" · ") || "Not provided" }}<span v-if="adminApplication.completionYear"> · {{ adminApplication.completionYear }}</span></dd></div>
+          <div><dt>Experience</dt><dd>{{ adminApplication.yearsExperience === null ? "Not provided" : `${adminApplication.yearsExperience} years` }}</dd></div>
+          <div><dt>Certifications</dt><dd>{{ adminApplication.certifications || "Not provided" }}</dd></div>
           <div><dt>License / registration</dt><dd>{{ adminApplication.licenseNumber || "Not applicable or not provided" }}<span v-if="adminApplication.licensingAuthority"> · {{ adminApplication.licensingAuthority }}</span><span v-if="adminApplication.licenseExpiry"> · Expires {{ adminApplication.licenseExpiry }}</span></dd></div>
-          <div><dt>Areas of expertise</dt><dd>{{ adminApplication.areasOfExpertise.join(", ") || "Not listed" }}</dd></div>
-          <div><dt>Languages</dt><dd>{{ adminApplication.languages.join(", ") || "Not listed" }}</dd></div>
-          <div class="application-detail-wide"><dt>Professional biography</dt><dd>{{ adminApplication.biography }}</dd></div>
+          <div><dt>Areas of expertise</dt><dd>{{ adminApplication.areasOfExpertise.join(", ") || "Not provided" }}</dd></div>
+          <div><dt>Languages</dt><dd>{{ adminApplication.languages.join(", ") || "Not provided" }}</dd></div>
           <div class="application-detail-wide"><dt>Work history</dt><dd>{{ adminApplication.workHistory || "Not provided" }}</dd></div>
           <div class="application-detail-wide"><dt>References</dt><dd>{{ adminApplication.referencesText || "Not provided" }}</dd></div>
-        </dl>
-        <Notice title="Credentials are applicant-provided until verified">
-          Code of conduct: {{ adminApplication.codeOfConductAccepted ? "accepted" : "not accepted" }} · Confidentiality: {{ adminApplication.confidentialityAccepted ? "accepted" : "not accepted" }} · Safeguarding: {{ adminApplication.safeguardingAccepted ? "accepted" : "not accepted" }}
-        </Notice>
+            </dl>
+            <Notice title="Platform approval is separate from professional verification">
+              Applicant-submitted qualifications and licenses are not treated as verified until a reviewer verifies them. Conduct: {{ adminApplication.codeOfConductAccepted ? "accepted" : "not accepted" }} · Confidentiality: {{ adminApplication.confidentialityAccepted ? "accepted" : "not accepted" }} · Safeguarding: {{ adminApplication.safeguardingAccepted ? "accepted" : "not accepted" }}
+            </Notice>
 
-        <div class="application-review-section">
-          <h3>Qualification verification</h3>
-          <div v-for="qualification in adminApplication.qualifications" :key="qualification.id" class="verification-row">
-            <span><strong>{{ qualification.qualification }}</strong><small>{{ qualification.qualificationType }} · {{ qualification.institution }}<template v-if="qualification.completionYear"> · {{ qualification.completionYear }}</template></small></span>
-            <Badge :tone="qualification.verificationStatus === 'verified' ? 'success' : 'warning'">{{ qualification.verificationStatus }}</Badge>
-            <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || qualification.verificationStatus === 'verified'" @click="verifyApplicationCredential('qualification', true, qualification.id)">Mark verified</BaseButton>
-            <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || qualification.verificationStatus === 'not_verified'" @click="verifyApplicationCredential('qualification', false, qualification.id)">Not verified</BaseButton>
-          </div>
-          <Field label="Credential verification reason"><textarea v-model="adminCredentialReason" class="control textarea" rows="2" minlength="5" maxlength="1000" /></Field>
-          <div v-if="adminApplication.licenseNumber" class="verification-row">
-            <span><strong>Professional license</strong><small>{{ adminApplication.licensingAuthority }} · {{ adminApplication.licenseNumber }}</small></span>
-            <Badge :tone="adminApplication.licenseVerified ? 'success' : 'warning'">{{ adminApplication.licenseVerified ? "verified" : "unverified" }}</Badge>
-            <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || adminApplication.licenseVerified" @click="verifyApplicationCredential('license', true)">Mark verified</BaseButton>
-            <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || !adminApplication.licenseVerified" @click="verifyApplicationCredential('license', false)">Not verified</BaseButton>
-          </div>
-        </div>
+            <div class="application-review-section">
+              <h3>Optional professional credential verification</h3>
+              <p class="field-hint">Account approval grants platform access; it does not certify professional qualifications or licensure. Verify credentials separately when provided and applicable.</p>
+              <div v-for="qualification in adminApplication.qualifications" :key="qualification.id" class="verification-row">
+                <span><strong>{{ qualification.qualification }}</strong><small>{{ qualification.qualificationType }} · {{ qualification.institution }}<template v-if="qualification.completionYear"> · {{ qualification.completionYear }}</template></small></span>
+                <Badge :tone="qualification.verificationStatus === 'verified' ? 'success' : 'warning'">{{ qualification.verificationStatus }}</Badge>
+                <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || qualification.verificationStatus === 'verified'" @click="verifyApplicationCredential('qualification', true, qualification.id)">Mark verified</BaseButton>
+                <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || qualification.verificationStatus === 'not_verified'" @click="verifyApplicationCredential('qualification', false, qualification.id)">Not verified</BaseButton>
+              </div>
+              <p v-if="!adminApplication.qualifications.length && !adminApplication.licenseNumber">No optional professional credentials provided.</p>
+              <Field v-if="adminApplication.qualifications.length || adminApplication.licenseNumber" label="Credential verification reason"><textarea v-model="adminCredentialReason" class="control textarea" rows="2" minlength="5" maxlength="1000" /></Field>
+              <div v-if="adminApplication.licenseNumber" class="verification-row">
+                <span><strong>Professional license</strong><small>{{ adminApplication.licensingAuthority || "Licensing authority not provided" }} · {{ adminApplication.licenseNumber }}</small></span>
+                <Badge :tone="adminApplication.licenseVerified ? 'success' : 'warning'">{{ adminApplication.licenseVerified ? "verified" : "unverified" }}</Badge>
+                <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || adminApplication.licenseVerified" @click="verifyApplicationCredential('license', true)">Mark verified</BaseButton>
+                <BaseButton variant="secondary" :disabled="adminCredentialReason.trim().length < 5 || !adminApplication.licenseVerified" @click="verifyApplicationCredential('license', false)">Not verified</BaseButton>
+              </div>
+            </div>
 
-        <div class="application-review-section">
-          <h3>Optional private documents</h3>
-          <div v-if="adminApplication.documents.length" class="application-document-list">
-            <div v-for="document in adminApplication.documents" :key="document.id">
-              <span><strong>{{ document.category.replace(/_/g, " ") }}</strong><small>{{ document.originalName || "Requested; not uploaded" }}<template v-if="document.byteSize"> · {{ Math.ceil(document.byteSize / 1024) }} KB</template></small></span>
-              <a v-if="document.status === 'uploaded'" class="inline-action" :href="adminApplicationDocumentUrl(document)">Download privately</a>
-              <Badge v-else tone="warning">Requested</Badge>
+            <div class="application-review-section">
+              <h3>Optional private documents</h3>
+              <div v-if="adminApplication.documents.length" class="application-document-list">
+                <div v-for="document in adminApplication.documents" :key="document.id">
+                  <span><strong>{{ document.category.replace(/_/g, " ") }}</strong><small>{{ document.originalName || "Requested; not uploaded" }}<template v-if="document.byteSize"> · {{ Math.ceil(document.byteSize / 1024) }} KB</template></small></span>
+                  <a v-if="document.status === 'uploaded'" class="inline-action" :href="adminApplicationDocumentUrl(document)">Download privately</a>
+                  <Badge v-else tone="warning">Requested</Badge>
+                </div>
+              </div>
+              <p v-else>No documents provided.</p>
+              <div v-for="response in adminApplication.responses" :key="response.created_at" class="application-notification">
+                <strong>Applicant response</strong><p>{{ response.message }}</p><small>{{ new Date(response.created_at).toLocaleString() }}</small>
+              </div>
             </div>
           </div>
-          <p v-else>No documents were uploaded. Missing documents do not automatically reject an application.</p>
-          <div v-for="response in adminApplication.responses" :key="response.created_at" class="application-notification">
-            <strong>Applicant response</strong><p>{{ response.message }}</p><small>{{ new Date(response.created_at).toLocaleString() }}</small>
-          </div>
-        </div>
+        </details>
 
         <div v-if="adminApplication.reviews.length" class="application-review-section">
           <h3>Review history</h3>
@@ -1765,7 +2091,7 @@ function counselorInitials(name: string) {
 
         <div class="application-review-section">
           <h3>Record a decision</h3>
-          <Field label="Decision reason"><textarea v-model="adminReviewReason" class="control textarea" rows="3" minlength="5" maxlength="3000" required /></Field>
+          <Field label="Decision reason" hint="Required for rejection or an information request; optional for approval"><textarea v-model="adminReviewReason" class="control textarea" rows="3" maxlength="3000" /></Field>
           <fieldset v-if="!['APPROVED', 'REJECTED'].includes(adminApplication.status)" class="requested-document-options">
             <legend>Optional documents to request</legend>
             <label v-for="category in ['qualification', 'license', 'supporting']" :key="category" class="check-label">
@@ -1774,9 +2100,7 @@ function counselorInitials(name: string) {
             </label>
           </fieldset>
           <div class="application-decision-actions">
-            <BaseButton v-if="['PENDING_APPROVAL', 'MORE_INFORMATION_REQUIRED'].includes(adminApplication.status)" variant="secondary" :disabled="adminReviewReason.trim().length < 5" @click="submitAdminApplicationReview('UNDER_REVIEW')">Move to review</BaseButton>
-            <BaseButton v-if="['PENDING_APPROVAL', 'UNDER_REVIEW'].includes(adminApplication.status)" variant="secondary" :disabled="adminReviewReason.trim().length < 5" @click="submitAdminApplicationReview('MORE_INFORMATION_REQUIRED')">Request information</BaseButton>
-            <BaseButton v-if="adminApplication.status === 'UNDER_REVIEW'" :disabled="adminReviewReason.trim().length < 5 || !adminApplication.qualificationVerified || Boolean(adminApplication.licenseNumber && !adminApplication.licenseVerified) || adminApplication.accountStatus !== 'active'" @click="submitAdminApplicationReview('APPROVED')">Approve application</BaseButton>
+            <BaseButton v-if="!['APPROVED', 'REJECTED'].includes(adminApplication.status)" variant="secondary" :disabled="adminReviewReason.trim().length < 5" @click="submitAdminApplicationReview('MORE_INFORMATION_REQUIRED')">Request information</BaseButton>
             <BaseButton v-if="!['APPROVED', 'REJECTED'].includes(adminApplication.status)" variant="danger" :disabled="adminReviewReason.trim().length < 5" @click="submitAdminApplicationReview('REJECTED')">Reject application</BaseButton>
             <BaseButton v-if="adminApplication.status === 'APPROVED'" :variant="adminApplication.accountStatus === 'active' ? 'danger' : 'secondary'" @click="toggleApplicantSuspension">{{ adminApplication.accountStatus === 'active' ? 'Suspend counselor' : 'Reactivate counselor' }}</BaseButton>
           </div>
@@ -1805,6 +2129,71 @@ function counselorInitials(name: string) {
         <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Account">{{ user.displayName || user.publicId }}<small>{{ user.publicId }}</small></span><span data-label="Role">{{ user.role }}</span><span data-label="Status">{{ user.status }}</span><span data-label="Review access">{{ user.safeguardingReview ? 'Granted' : 'Not granted' }}</span><button class="inline-action" @click="toggleSafeguardingPermission(user)">{{ user.safeguardingReview ? 'Revoke' : 'Grant' }}</button></div>
       </div>
     </section>
+    <section v-else-if="adminTab === 'Settings' && !state.demo" class="admin-settings-grid">
+      <section class="panel settings-card">
+        <span class="section-kicker">Public homepage</span>
+        <h2>Homepage image</h2>
+        <p>Choose the photo shown in the homepage hero. The image is stored in PostgreSQL so it remains available after the API restarts. JPEG, PNG, and WebP files up to 5 MB are supported.</p>
+        <div v-if="homepageSettingsLoading" class="settings-image-preview settings-image-empty" role="status">
+          Loading current homepage image…
+        </div>
+        <div v-else class="settings-image-preview">
+          <img
+            v-if="homepageImagePreview || homepageImageUrl"
+            :src="homepageImagePreview || apiUrl(homepageImageUrl || '')"
+            :alt="homepageImagePreview ? homepageImageAltDraft : homepageImageAlt"
+          />
+          <div v-else class="settings-image-empty">The homepage is using its original artwork.</div>
+        </div>
+        <small v-if="homepageImageUpdatedAt" class="settings-image-updated">
+          Last updated {{ new Date(homepageImageUpdatedAt).toLocaleString() }}
+        </small>
+        <form class="settings-form settings-site-form" @submit.prevent="saveHomepageImage">
+          <Field label="Choose a homepage image" hint="JPEG, PNG, or WebP · maximum 5 MB">
+            <input
+              class="control file-control"
+              type="file"
+              ref="homepageImageInput"
+              accept="image/jpeg,image/png,image/webp"
+              @change="selectHomepageImage"
+            />
+          </Field>
+          <Field label="Image description" hint="Describe the image for visitors using a screen reader.">
+            <input
+              v-model="homepageImageAltDraft"
+              class="control"
+              type="text"
+              minlength="3"
+              maxlength="160"
+              required
+              autocomplete="off"
+            />
+          </Field>
+          <p v-if="homepageSettingsError" class="form-error" role="alert">{{ homepageSettingsError }}</p>
+          <p v-if="homepageSettingsStatus" class="settings-success" role="status">{{ homepageSettingsStatus }}</p>
+          <div class="settings-actions">
+            <BaseButton type="submit" :disabled="homepageSettingsSaving || !homepageImageFile || homepageImageAltDraft.trim().length < 3">
+              {{ homepageSettingsSaving ? 'Saving…' : 'Save homepage image' }}
+            </BaseButton>
+            <BaseButton
+              v-if="homepageImageFile"
+              type="button"
+              variant="secondary"
+              :disabled="homepageSettingsSaving"
+              @click="clearHomepageImagePreview"
+            >Cancel selection</BaseButton>
+            <BaseButton
+              v-if="homepageImageUrl"
+              type="button"
+              variant="danger"
+              :disabled="homepageSettingsSaving"
+              @click="removeHomepageImage"
+            >Remove image</BaseButton>
+          </div>
+        </form>
+      </section>
+      <Notice title="Administrative settings">Homepage artwork changes are public and are recorded in the audit log. Access policies, safeguarding rules, and ministry content are intentionally not editable here; those require approved governance settings.</Notice>
+    </section>
     <section v-else class="panel"><div class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ adminTab }} workspace</h3><p>{{ adminTabDescriptions[adminTab] }}</p><BaseButton variant="secondary">Review access policy</BaseButton></div></section>
     </template>
   </AppShell>
@@ -1831,10 +2220,41 @@ function counselorInitials(name: string) {
       <section class="panel settings-card">
         <div class="card-heading"><div><span class="section-kicker">Account identity</span><h2>{{ account.user.displayName || "Private account" }}</h2></div><Badge tone="success">{{ account.user.status }}</Badge></div>
         <dl class="account-details"><div><dt>Public account ID</dt><dd>{{ account.user.publicId }}</dd></div><div><dt>Account type</dt><dd>{{ account.user.accountType === 'anonymous' ? 'Private / anonymous' : account.user.accountType === 'counselor' ? 'Counselor account' : 'Regular user' }}</dd></div><div><dt>Access role</dt><dd>{{ account.user.role }}</dd></div><div><dt>Real-world identity</dt><dd>{{ account.user.accountType === 'anonymous' ? 'Not required' : 'Email provided' }}</dd></div></dl>
+        <form v-if="account.user.role !== 'counselor'" class="settings-form" @submit.prevent="saveDisplayName">
+          <Field label="Display name" :hint="account.user.accountType === 'anonymous' ? 'Optional. Leave blank to remain a private account.' : 'Shown on your account and to people you connect with.'">
+            <input v-model="displayNameDraft" class="control" maxlength="80" autocomplete="nickname" />
+          </Field>
+          <BaseButton type="submit" variant="secondary" :disabled="profileLoading">{{ profileLoading ? 'Saving…' : 'Save display name' }}</BaseButton>
+        </form>
         <Notice title="Recovery and privacy">Your public ID is for identification in ShepherdConnect, not authentication. Keep your password and one-time recovery code private. Private mode avoids requiring real-world identity, but does not guarantee technical untraceability.</Notice>
         <div class="settings-actions"><BaseButton variant="secondary" :disabled="profileLoading" @click="rotateRecoveryCode">{{ profileLoading ? 'Please wait…' : 'Rotate recovery code' }}</BaseButton><BaseButton variant="danger" :disabled="profileLoading" @click="deactivateAccount">Deactivate account</BaseButton></div>
         <p v-if="profileStatus && !recoveryCode" class="form-error" role="alert">{{ profileStatus }}</p>
         <div v-if="recoveryCode" class="recovery-display settings-recovery" aria-live="polite"><strong>{{ profileStatus }}</strong><code>{{ recoveryCode }}</code><BaseButton variant="secondary" @click="copyRecoveryCode">{{ recoveryCopied ? 'Copied' : 'Copy recovery code' }}</BaseButton><small>This code is shown only now. Save it securely; the old code is invalid.</small></div>
+      </section>
+      <section
+        v-if="account.user.accountType === 'registered' && account.user.role === 'registered'"
+        class="panel settings-card"
+      >
+        <span class="section-kicker">Counselor application</span>
+        <h2>Apply using this account</h2>
+        <p>Your existing email, password, and account history will stay with this account. Counselor features remain unavailable unless a SuperAdmin approves your application.</p>
+        <CounselorRegistrationForm
+          :busy="authLoading"
+          :error="authStatus"
+          :existing-account="true"
+          @submit="submitCounselorApplication"
+        />
+      </section>
+      <section class="panel settings-card">
+        <span class="section-kicker">Sign-in security</span><h2>Change password</h2>
+        <p>Confirm your current password to choose a new one. Other active sessions will be signed out; this session will stay active.</p>
+        <form class="settings-form" @submit.prevent="changeAccountPassword">
+          <Field label="Current password"><input v-model="currentPassword" class="control" type="password" minlength="1" maxlength="128" required autocomplete="current-password" /></Field>
+          <Field label="New password" hint="Use at least 12 characters."><input v-model="newAccountPassword" class="control" type="password" minlength="12" maxlength="128" required autocomplete="new-password" /></Field>
+          <Field label="Confirm new password"><input v-model="confirmAccountPassword" class="control" type="password" minlength="12" maxlength="128" required autocomplete="new-password" /></Field>
+          <p v-if="passwordStatus" :class="passwordStatus.startsWith('Password updated') ? 'settings-success' : 'form-error'" :role="passwordStatus.startsWith('Password updated') ? 'status' : 'alert'">{{ passwordStatus }}</p>
+          <BaseButton type="submit" :disabled="passwordLoading">{{ passwordLoading ? 'Updating…' : 'Update password' }}</BaseButton>
+        </form>
       </section>
       <section v-if="account.user.accountType === 'anonymous'" class="panel settings-card">
         <span class="section-kicker">Optional upgrade</span><h2>Register this account</h2>
@@ -1849,15 +2269,48 @@ function counselorInitials(name: string) {
         </form>
       </section>
       <section v-if="account.user.role === 'counselor'" class="panel settings-card">
-        <span class="section-kicker">Counselor profile</span><h2>Keep your support profile current</h2>
+        <span class="section-kicker">Approved counselor profile</span><h2>Update your professional profile when you choose</h2>
+        <p>These details are optional and can be added or updated after approval. Professional credentials remain unverified until reviewed separately.</p>
         <form class="settings-form" @submit.prevent="saveCounselorProfile">
-          <Field label="Profile headline"><input v-model="counselorHeadline" class="control" maxlength="120" required /></Field>
-          <Field label="Introduction"><textarea v-model="counselorBio" class="control textarea" rows="4" maxlength="1000" /></Field>
-          <Field label="Service areas" hint="Separate items with commas"><input v-model="counselorAreas" class="control" maxlength="1000" /></Field>
-          <Field label="Languages" hint="Separate items with commas"><input v-model="counselorLanguages" class="control" maxlength="600" /></Field>
+          <Field label="Public display name"><input v-model="displayNameDraft" class="control" maxlength="80" required autocomplete="nickname" /></Field>
+          <Field label="Professional title — optional"><input v-model="counselorProfessionalTitle" class="control" maxlength="120" placeholder="e.g. Pastoral counselor" /></Field>
+          <Field label="Profile headline — optional"><input v-model="counselorHeadline" class="control" maxlength="120" /></Field>
+          <Field label="Short biography — optional" hint="Up to 5000 characters"><textarea v-model="counselorBio" class="control textarea" rows="4" maxlength="5000" /></Field>
+          <Field label="Counseling specialization" hint="Separate items with commas"><input v-model="counselorAreas" class="control" maxlength="1000" /></Field>
+          <Field label="Languages spoken — optional" hint="Separate items with commas"><input v-model="counselorLanguages" class="control" maxlength="1000" /></Field>
+          <Field label="Highest qualification — optional"><input v-model="counselorHighestQualification" class="control" maxlength="180" /></Field>
+          <Field label="Institution — optional"><input v-model="counselorInstitution" class="control" maxlength="180" /></Field>
+          <Field label="Qualification type — optional"><input v-model="counselorQualificationType" class="control" maxlength="120" /></Field>
+          <Field label="Completion year — optional"><input v-model="counselorCompletionYear" class="control" type="number" min="1900" max="2100" /></Field>
+          <Field label="Years of relevant experience — optional"><input v-model="counselorYearsExperience" class="control" type="number" min="0" max="80" /></Field>
+          <Field label="Certifications — optional"><textarea v-model="counselorCertifications" class="control textarea" rows="3" maxlength="3000" /></Field>
+          <Field label="Professional license or registration — optional"><input v-model="counselorLicenseNumber" class="control" maxlength="160" /></Field>
+          <Field label="Licensing authority — optional"><input v-model="counselorLicensingAuthority" class="control" maxlength="180" /></Field>
+          <Field label="License expiry — optional"><input v-model="counselorLicenseExpiry" class="control" type="date" /></Field>
+          <Field label="Relevant work history — optional"><textarea v-model="counselorWorkHistory" class="control textarea" rows="4" maxlength="5000" /></Field>
+          <Field label="Professional references — optional" hint="Share only information you are authorized to provide"><textarea v-model="counselorReferences" class="control textarea" rows="3" maxlength="3000" /></Field>
           <p v-if="profileStatus && !recoveryCode" class="form-error" role="alert">{{ profileStatus }}</p>
           <BaseButton type="submit" :disabled="profileLoading">{{ profileLoading ? 'Saving…' : 'Save counselor profile' }}</BaseButton>
         </form>
+        <div class="application-review-section">
+          <h3>Optional supporting documents</h3>
+          <p class="field-hint">Upload documents only if you choose to add them. PDF, JPEG, or PNG; maximum 10 MB per file and five files per submission. Profile photos must be JPEG or PNG.</p>
+          <div v-if="counselorProfileDocuments.length" class="application-document-list">
+            <div v-for="document in counselorProfileDocuments" :key="document.id">
+              <span><strong>{{ document.category.replace(/_/g, ' ') }}</strong><small>{{ document.original_name || 'Document' }}<template v-if="document.byte_size"> · {{ Math.ceil(document.byte_size / 1024) }} KB</template></small></span>
+              <a v-if="document.status === 'uploaded'" class="inline-action" :href="counselorProfileDocumentUrl(document)">Download privately</a>
+            </div>
+          </div>
+          <p v-else>No documents added.</p>
+          <form class="settings-form" @submit.prevent="uploadCounselorProfileDocuments">
+            <Field label="Qualification certificates — optional"><input class="control file-control" type="file" name="qualificationDocuments" accept=".pdf,.jpg,.jpeg,.png" multiple /></Field>
+            <Field label="License or registration evidence — optional"><input class="control file-control" type="file" name="licenseDocuments" accept=".pdf,.jpg,.jpeg,.png" multiple /></Field>
+            <Field label="Additional supporting documents — optional"><input class="control file-control" type="file" name="supportingDocuments" accept=".pdf,.jpg,.jpeg,.png" multiple /></Field>
+            <Field label="Profile photograph — optional" hint="JPEG or PNG"><input class="control file-control" type="file" name="profilePhoto" accept=".jpg,.jpeg,.png" /></Field>
+            <p v-if="counselorDocumentStatus" :class="counselorDocumentStatus.includes('uploaded') ? 'settings-success' : 'form-error'" role="status">{{ counselorDocumentStatus }}</p>
+            <BaseButton type="submit" variant="secondary" :disabled="profileLoading">{{ profileLoading ? 'Uploading…' : 'Upload selected documents' }}</BaseButton>
+          </form>
+        </div>
       </section>
     </template>
     <Notice v-else title="Demo workspace">Account settings and recovery are not connected in the synthetic demo. Create a private or registered account to use these controls.</Notice>

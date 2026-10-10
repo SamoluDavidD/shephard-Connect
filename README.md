@@ -79,28 +79,38 @@ Run `pnpm api` and `pnpm dev` in separate terminals for local development. The d
 
 ## Counselor registration and API
 
-The registration form exposes exactly three public account types: Regular User, Anonymous User, and Counselor. A counselor application starts as `PENDING_APPROVAL`; counselor permissions are assigned only after a SuperAdmin records the decision and verifies the required qualification (and any license provided). Account suspension is stored separately from application status.
+The registration form exposes exactly three public account types: Regular User, Anonymous User, and Counselor. New counselor registrations require a valid email, password, full name, counseling specialization, and acceptance of counselor conduct, confidentiality, and safeguarding requirements. A signed-in regular user can instead apply from Account settings using the existing account, email, and password; the application keeps counselor access disabled until SuperAdmin approval. Biography, preferred display name, location, professional title, experience, qualifications, license details, expertise lists, languages, work history, references, and supporting documents are optional and can be added after approval.
+
+A counselor application starts as `PENDING_APPROVAL`; a SuperAdmin can approve an active applicant directly from the application summary, or request information / reject with a reason. Approval grants platform counselor access but does not represent professional credential or license verification. Optional credentials can be reviewed and verified separately, including after platform approval. Account suspension is stored separately from application status.
 
 | Method | Path | Access |
 | --- | --- | --- |
 | POST | `/api/auth/register` | Public regular-user registration; consent required |
 | POST | `/api/auth/anonymous` | Public anonymous registration |
 | POST | `/api/auth/counselor` | Public counselor application; documents optional |
+| POST | `/api/counselor/applications` | Signed-in regular user applying with the existing account |
 | GET | `/api/counselor/applications/me` | Applicant's own status and documents |
 | POST | `/api/counselor/applications/:ref/responses` | Applicant responding to an information request |
 | POST | `/api/counselor/applications/:ref/documents` | Applicant; only documents requested by a reviewer |
 | GET | `/api/admin/counselor-applications` | SuperAdmin |
 | GET | `/api/admin/counselor-applications/:ref` | SuperAdmin |
-| PATCH | `/api/admin/counselor-applications/:ref/review` | SuperAdmin; reason required |
+| PATCH | `/api/admin/counselor-applications/:ref/review` | SuperAdmin; rejection / information-request reason required |
 | PATCH | `/api/admin/counselor-applications/:ref/qualifications/:id/verification` | SuperAdmin |
 | PATCH | `/api/admin/counselor-applications/:ref/license-verification` | SuperAdmin |
 | GET | `/api/counselor/applications/:ref/documents/:id` | Applicant or SuperAdmin; private download |
 | GET | `/api/notifications` | Own notifications |
 | PATCH | `/api/notifications/:id/read` | Own notification |
+| GET | `/api/site-settings` | Public homepage image metadata |
+| GET | `/api/site-settings/homepage-image` | Public configured homepage image |
+| GET | `/api/admin/site-settings` | SuperAdmin |
+| POST | `/api/admin/site-settings/homepage-image` | SuperAdmin; JPEG, PNG, or WebP up to 5 MB |
+| DELETE | `/api/admin/site-settings/homepage-image` | SuperAdmin |
+| PATCH | `/api/me` | Own display name |
+| PATCH | `/api/me/password` | Own account; current password required |
 
 ## Persistence and migrations
 
-Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. No migration constraint requires supporting-document records.
+Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. Migration `003_site_settings.sql` adds a singleton setting for the public homepage image and its accessible description; migration `004_optional_counselor_information.sql` makes nonessential counselor-profile and professional details nullable and removes the license-authority dependency while preserving existing records and uploaded documents. Homepage image bytes are stored in PostgreSQL, so they persist across API restarts. Homepage image uploads are restricted to SuperAdmins and validated by file signature and a 5 MB size limit. The homepage image is publicly readable and versioned for cache invalidation. No migration constraint requires supporting-document records.
 
 Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names; original names and storage paths are never exposed as public URLs. Production deployments should use a private persistent volume with encryption at rest, restricted service access, backups, and a tested retention/deletion policy. The authenticated API streams file contents only to the applicant or a SuperAdmin reviewer.
 
@@ -108,6 +118,8 @@ Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names
 
 - Express checks an active server-side session for protected requests.
 - Administrative roles do not automatically receive message access.
+- SuperAdmins can update public homepage artwork; these changes are recorded in the append-only audit log.
+- Password changes require the current password and revoke the account's other active sessions.
 - Message content is not copied into audit events or notification helpers.
 - The service does not claim end-to-end encryption.
 - State-changing requests require an exact configured `APP_ORIGINS` match.
@@ -117,14 +129,17 @@ Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names
 
 ## Verification completed
 
-- `pnpm build` completed successfully, including the Vue TypeScript check and production Vite build.
-- `pnpm test` passed: 16 tests across 2 test files, covering counselor registration, SuperAdmin review and credential verification, applicant responses, requested-document uploads, and authorization boundaries.
-- Both PostgreSQL migrations were applied successfully to the configured Supabase PostgreSQL 17.11 database. A repeat migration run completed without reapplying either migration.
-- Live schema verification confirmed 19 public tables, 108 primary-key, foreign-key, unique, and check constraints, and both migration ledger entries.
+- `pnpm build` completes the Vue TypeScript check and production Vite build.
+- `pnpm test` passes: 21 tests across 2 test files, including an existing regular account applying for counselor access without creating a duplicate identity.
+- All five PostgreSQL migrations were applied successfully to the configured Supabase PostgreSQL 17.11 database. A repeat migration run completed without reapplying them.
+- Live schema verification confirmed 20 public tables and all five migration ledger entries.
 - The Express `/health` route and public counselor API succeeded against the live database; unauthenticated `/api/me` returned 401 as expected.
 - The bootstrap SuperAdmin authenticated through the live API, received the expected SuperAdmin role, and successfully logged out; the revoked session then returned 401.
+- Admin settings now support persistent homepage image upload/removal with accessible alt text, and account settings support display-name and password updates.
+- A live browser/API check uploaded the supplied logo as a temporary homepage image, confirmed that the public homepage displayed the image with its alt text, and removed it afterward; the original homepage artwork is restored.
+- Server tests cover SuperAdmin-only homepage image management, image signature validation, public image delivery, and password updates with other-session revocation.
 - The database contained no pre-existing application users or counselor applications at migration time.
-- A live Supabase-backed API workflow passed 67 assertions across signup, account recovery, journey progress, safeguarding reports, counselor application review and credential verification, role-based access, counseling requests, conversations, messaging, suspension, session revocation, reactivation, and fresh login.
+- A live Supabase-backed API workflow passed 67 assertions across signup, account recovery, journey progress, safeguarding reports, counselor application review and separate credential verification, role-based access, counseling requests, conversations, messaging, suspension, session revocation, reactivation, and fresh login. The optional-information migration was applied and the nullable profile columns / removed license-authority constraint were verified.
 - Temporary workflow accounts and related application/request content were scrubbed or deactivated after testing. Append-only audit events are intentionally retained; do not disable the audit immutability trigger or delete those records.
 
 External penetration testing, accessibility audit, legal review, safeguarding operational exercises, backup restoration, retention/deletion tests, and cross-browser device testing have not been completed.

@@ -36,6 +36,13 @@ const documentUpload = multer({
     fieldSize: 32 * 1024,
   },
 })
+const homepageImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+  },
+})
 const passwordOptions = {
   type: argon2.argon2id,
   memoryCost: 65_536,
@@ -58,30 +65,40 @@ const registeredSchema = authSchema.extend({
   displayName: z.string().trim().min(1).max(80),
 })
 const optionalText = (max) =>
-  z.string().trim().max(max).optional().transform((value) => value || null)
+  z.union([z.string().trim().max(max), z.null()])
+    .optional()
+    .transform((value) => typeof value === "string" && value ? value : null)
 const counselorApplicationSchema = authSchema.extend({
   email: z.string().trim().email().max(254),
   fullLegalName: z.string().trim().min(1).max(160),
-  preferredDisplayName: z.string().trim().min(1).max(80),
+  preferredDisplayName: optionalText(80),
   phone: optionalText(40),
-  country: z.string().trim().min(1).max(100),
-  generalLocation: z.string().trim().min(1).max(160),
-  professionalTitle: z.string().trim().min(1).max(120),
+  country: optionalText(100),
+  generalLocation: optionalText(160),
+  professionalTitle: optionalText(120),
   specialization: z.string().trim().min(1).max(160),
-  highestQualification: z.string().trim().min(1).max(180),
-  institution: z.string().trim().min(1).max(180),
-  qualificationType: z.string().trim().min(1).max(120),
-  completionYear: z.number().int().min(1900).max(2100).nullable(),
-  certifications: z.string().trim().max(3000).default(""),
-  yearsExperience: z.number().int().min(0).max(80),
+  highestQualification: optionalText(180),
+  institution: optionalText(180),
+  qualificationType: optionalText(120),
+  completionYear: z.number().int().min(1900).max(2100).nullable().optional().transform((value) => value ?? null),
+  certifications: optionalText(3000),
+  yearsExperience: z.number().int().min(0).max(80).nullable().optional().transform((value) => value ?? null),
   licenseNumber: optionalText(160),
   licensingAuthority: optionalText(180),
-  licenseExpiry: z.string().date().nullable(),
-  biography: z.string().trim().min(30).max(5000),
-  areasOfExpertise: z.array(z.string().trim().min(1).max(80)).max(12),
-  languages: z.array(z.string().trim().min(1).max(80)).max(12),
-  workHistory: z.string().trim().max(5000).default(""),
-  referencesText: z.string().trim().max(3000).default(""),
+  licenseExpiry: z.string().date().nullable().optional().transform((value) => value ?? null),
+  biography: optionalText(5000),
+  areasOfExpertise: z.array(z.string().trim().min(1).max(80)).max(12).nullable().optional().transform((value) => value ?? []),
+  languages: z.array(z.string().trim().min(1).max(80)).max(12).nullable().optional().transform((value) => value ?? []),
+  workHistory: optionalText(5000),
+  referencesText: optionalText(3000),
+  codeOfConductAccepted: z.literal(true),
+  confidentialityAccepted: z.literal(true),
+  safeguardingAccepted: z.literal(true),
+})
+const existingCounselorApplicationSchema = z.object({
+  fullLegalName: z.string().trim().min(1).max(160),
+  preferredDisplayName: optionalText(80),
+  specialization: z.string().trim().min(1).max(160),
   codeOfConductAccepted: z.literal(true),
   confidentialityAccepted: z.literal(true),
   safeguardingAccepted: z.literal(true),
@@ -132,6 +149,26 @@ function clearSessionCookie(res, secure) {
 
 function sendInvalid(res) {
   return res.status(401).json({ error: "The supplied credentials could not be verified." })
+}
+
+function detectedHomepageImageType(buffer) {
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return "image/png"
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "image/jpeg"
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp"
+  }
+  return null
 }
 
 function validateBody(schema, req, res) {
@@ -315,6 +352,46 @@ export function createApp({
     }
   })
 
+  app.get("/api/site-settings", async (_req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT homepage_image_alt, homepage_image_updated_at
+         FROM site_settings WHERE id = true`,
+      )
+      const updatedAt = result.rows[0]?.homepage_image_updated_at || null
+      res.json({
+        homepageImageUrl: updatedAt
+          ? `/site-settings/homepage-image?v=${encodeURIComponent(new Date(updatedAt).toISOString())}`
+          : null,
+        homepageImageUpdatedAt: updatedAt,
+        homepageImageAlt: result.rows[0]?.homepage_image_alt || "",
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/site-settings/homepage-image", async (_req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT homepage_image, homepage_image_type, homepage_image_updated_at
+         FROM site_settings WHERE id = true`,
+      )
+      const setting = result.rows[0]
+      if (!setting?.homepage_image) {
+        return res.status(404).json({ error: "No homepage image has been configured." })
+      }
+      res.set({
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+      })
+      res.type(setting.homepage_image_type).send(setting.homepage_image)
+    } catch (error) {
+      next(error)
+    }
+  })
+
   const authLimit = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 8,
@@ -455,7 +532,10 @@ export function createApp({
         })
       }
 
-      const input = parsed.data
+      const input = {
+        ...parsed.data,
+        preferredDisplayName: parsed.data.preferredDisplayName || parsed.data.fullLegalName,
+      }
       const storedKeys = []
       try {
         const result = await inTransaction(pool, async (client) => {
@@ -509,18 +589,20 @@ export function createApp({
             ],
           )
           const application = applicationResult.rows[0]
-          await client.query(
-            `INSERT INTO counselor_qualifications
-               (application_id, qualification, institution, qualification_type, completion_year)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [
-              application.id,
-              input.highestQualification,
-              input.institution,
-              input.qualificationType,
-              input.completionYear,
-            ],
-          )
+          if (input.highestQualification && input.institution && input.qualificationType) {
+            await client.query(
+              `INSERT INTO counselor_qualifications
+                 (application_id, qualification, institution, qualification_type, completion_year)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [
+                application.id,
+                input.highestQualification,
+                input.institution,
+                input.qualificationType,
+                input.completionYear,
+              ],
+            )
+          }
 
           for (const item of preparedFiles) {
             const storageKey = await savePrivateDocument(item.file, privateDocumentPath)
@@ -569,12 +651,102 @@ export function createApp({
       } catch (error) {
         if (storedKeys.length) await removePrivateDocuments(storedKeys, privateDocumentPath)
         if (error.code === "23505") {
+          if (error.constraint === "user_credentials_email_normalized_key") {
+            return res.status(409).json({
+              error: "This email is already attached to an account. Sign in to that account, then apply from Account settings.",
+            })
+          }
           return res.status(409).json({ error: "An account could not be created with those details." })
         }
         next(error)
       }
     },
   )
+
+  app.post("/api/counselor/applications", requireAuth, requireRole("registered"), async (req, res, next) => {
+    if (req.user.account_type !== "registered") {
+      return res.status(403).json({ error: "Only regular user accounts can apply for counselor access." })
+    }
+    const input = validateBody(existingCounselorApplicationSchema, req, res)
+    if (!input) return
+    try {
+      const result = await inTransaction(pool, async (client) => {
+        const existing = await client.query(
+          "SELECT id FROM counselor_applications WHERE user_id = $1",
+          [req.user.id],
+        )
+        if (existing.rowCount) return { conflict: true }
+
+        const applicationRef = createPublicId("CA")
+        const preferredDisplayName = input.preferredDisplayName || input.fullLegalName
+        const created = await client.query(
+          `INSERT INTO counselor_applications (
+             public_ref, user_id, full_legal_name, preferred_display_name, phone,
+             country, general_location, professional_title, specialization,
+             highest_qualification, institution, qualification_type, completion_year,
+             certifications, years_experience, license_number, licensing_authority,
+             license_expiry, biography, areas_of_expertise, languages, work_history,
+             references_text, code_of_conduct_accepted, confidentiality_accepted,
+             safeguarding_accepted
+           ) VALUES (
+             $1, $2, $3, $4, NULL, NULL, NULL, NULL, $5, NULL, NULL, NULL, NULL,
+             NULL, NULL, NULL, NULL, NULL, NULL, '{}', '{}', NULL, NULL, true, true, true
+           ) RETURNING id, status, submitted_at`,
+          [
+            applicationRef,
+            req.user.id,
+            input.fullLegalName,
+            preferredDisplayName,
+            input.specialization,
+          ],
+        )
+        const application = created.rows[0]
+        const promoted = await client.query(
+          `UPDATE users SET account_type = 'counselor', updated_at = now()
+           WHERE id = $1 AND account_type = 'registered' AND role = 'registered'`,
+          [req.user.id],
+        )
+        if (!promoted.rowCount) throw new Error("The applicant account could not be updated.")
+        await client.query(
+          `UPDATE user_profiles SET display_name = $2, updated_at = now()
+           WHERE user_id = $1`,
+          [req.user.id, preferredDisplayName],
+        )
+        await client.query(
+          `INSERT INTO user_notifications (user_id, application_id, kind, title, message)
+           SELECT id, $1, 'counselor_application', 'New counselor application',
+                  'A counselor application is ready for review (' || $2 || ').'
+           FROM users WHERE role = 'superadmin' AND status = 'active'`,
+          [application.id, applicationRef],
+        )
+        await appendAudit(
+          client,
+          req.user.id,
+          "counselor.application_submitted",
+          "counselor_application",
+          application.id,
+        )
+        return { application, preferredDisplayName, publicRef: applicationRef }
+      })
+      if (result.conflict) {
+        return res.status(409).json({ error: "A counselor application already exists for this account." })
+      }
+      res.status(201).json({
+        user: safeUser({
+          ...req.user,
+          account_type: "counselor",
+          display_name: result.preferredDisplayName,
+        }),
+        application: {
+          publicRef: result.publicRef,
+          status: result.application.status,
+          submittedAt: result.application.submitted_at,
+        },
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
 
   const loginSchema = z.object({
     login: z.string().trim().min(1).max(254),
@@ -693,7 +865,7 @@ export function createApp({
           [req.user.id],
         ),
         pool.query(
-          `SELECT reason, created_at FROM counselor_reviews
+          `SELECT reason, requested_document_categories, created_at FROM counselor_reviews
            WHERE application_id = (
              SELECT id FROM counselor_applications WHERE user_id = $1
            ) AND action = 'REQUESTED_MORE_INFORMATION'
@@ -701,13 +873,30 @@ export function createApp({
           [req.user.id],
         ),
       ])
+      const requestedDocumentCategories = requests.rows.flatMap((row) =>
+        Array.isArray(row.requested_document_categories)
+          ? row.requested_document_categories
+          : [],
+      )
+      const fallbackDocuments = requestedDocumentCategories.map((category, index) => ({
+        id: `${application.public_ref}-${category}-${index}`,
+        category,
+        status: "requested",
+        original_name: null,
+        mime_type: null,
+        byte_size: null,
+        uploaded_at: null,
+        requested_at: requests.rows[0]?.created_at || null,
+      }))
       res.json({
         application: {
           publicRef: application.public_ref,
           status: application.status,
           submittedAt: application.submitted_at,
           updatedAt: application.updated_at,
-          documents: documents.rows.map(publicDocumentMetadata),
+          documents: documents.rows.length
+            ? documents.rows.map(publicDocumentMetadata)
+            : fallbackDocuments.map(publicDocumentMetadata),
           informationRequests: requests.rows,
         },
       })
@@ -920,6 +1109,53 @@ export function createApp({
     }
   })
 
+  app.patch("/api/me/password", requireAuth, async (req, res, next) => {
+    const input = validateBody(
+      z.object({
+        currentPassword: z.string().min(1).max(128),
+        newPassword: z.string().min(12).max(128),
+      }),
+      req,
+      res,
+    )
+    if (!input) return
+    if (input.currentPassword === input.newPassword) {
+      return res.status(400).json({ error: "Choose a new password different from your current password." })
+    }
+    try {
+      const updated = await inTransaction(pool, async (client) => {
+        const credentials = await client.query(
+          `SELECT password_hash FROM user_credentials
+           WHERE user_id = $1 FOR UPDATE`,
+          [req.user.id],
+        )
+        const currentHash = credentials.rows[0]?.password_hash
+        if (!currentHash || !(await argon2.verify(currentHash, input.currentPassword))) {
+          return false
+        }
+        const passwordHash = await argon2.hash(input.newPassword, passwordOptions)
+        await client.query(
+          `UPDATE user_credentials SET password_hash = $2, updated_at = now()
+           WHERE user_id = $1`,
+          [req.user.id, passwordHash],
+        )
+        await client.query(
+          `UPDATE sessions SET revoked_at = now()
+           WHERE user_id = $1 AND token_hash <> $2 AND revoked_at IS NULL`,
+          [req.user.id, req.sessionTokenHash],
+        )
+        await appendAudit(client, req.user.id, "password.changed", "user", req.user.id)
+        return true
+      })
+      if (!updated) {
+        return res.status(403).json({ error: "The current password could not be verified." })
+      }
+      res.json({ updated: true })
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.post("/api/auth/recovery-code/rotate", requireAuth, async (req, res, next) => {
     try {
       const recoveryCode = createRecoveryCode()
@@ -1052,14 +1288,116 @@ export function createApp({
     }
   })
 
+  app.get("/api/admin/site-settings", requireAuth, requireAdmin, async (_req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT homepage_image IS NOT NULL AS has_homepage_image,
+                homepage_image_alt,
+                homepage_image_type, homepage_image_updated_at
+         FROM site_settings WHERE id = true`,
+      )
+      const settings = result.rows[0]
+      if (!settings) return res.status(503).json({ error: "Site settings are not initialized." })
+      res.json({
+        homepageImageUrl: settings.homepage_image_updated_at
+          ? `/site-settings/homepage-image?v=${encodeURIComponent(new Date(settings.homepage_image_updated_at).toISOString())}`
+          : null,
+        homepageImageType: settings.homepage_image_type,
+        homepageImageUpdatedAt: settings.homepage_image_updated_at,
+        homepageImageAlt: settings.homepage_image_alt || "",
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post(
+    "/api/admin/site-settings/homepage-image",
+    requireAuth,
+    requireAdmin,
+    homepageImageUpload.single("homepageImage"),
+    async (req, res, next) => {
+      if (!req.file) {
+        return res.status(400).json({ error: "Choose a JPEG, PNG, or WebP image to upload." })
+      }
+      const parsedAlt = z.string().trim().min(3).max(160).safeParse(req.body.homepageImageAlt)
+      if (!parsedAlt.success) {
+        return res.status(400).json({ error: "Provide descriptive alt text between 3 and 160 characters." })
+      }
+      const imageType = detectedHomepageImageType(req.file.buffer)
+      if (!imageType || imageType !== req.file.mimetype) {
+        return res.status(400).json({ error: "The selected file is not a valid JPEG, PNG, or WebP image." })
+      }
+      try {
+        const result = await inTransaction(pool, async (client) => {
+          const updated = await client.query(
+            `UPDATE site_settings
+             SET homepage_image = $1, homepage_image_alt = $2,
+                 homepage_image_type = $3, homepage_image_updated_at = now(),
+                 updated_by = $4
+             WHERE id = true
+             RETURNING homepage_image_type, homepage_image_updated_at`,
+            [req.file.buffer, parsedAlt.data, imageType, req.user.id],
+          )
+          if (!updated.rowCount) throw new Error("Site settings are not initialized.")
+          await appendAudit(client, req.user.id, "site.homepage_image_updated", "site_settings", null, {
+            imageType,
+            byteSize: req.file.size,
+          })
+          return updated.rows[0]
+        })
+        res.json({
+          homepageImageUrl: `/site-settings/homepage-image?v=${encodeURIComponent(new Date(result.homepage_image_updated_at).toISOString())}`,
+          homepageImageType: result.homepage_image_type,
+          homepageImageUpdatedAt: result.homepage_image_updated_at,
+          homepageImageAlt: parsedAlt.data,
+        })
+      } catch (error) {
+        next(error)
+      }
+    },
+  )
+
+  app.delete("/api/admin/site-settings/homepage-image", requireAuth, requireAdmin, async (req, res, next) => {
+    try {
+      await inTransaction(pool, async (client) => {
+        const updated = await client.query(
+          `UPDATE site_settings
+           SET homepage_image = NULL, homepage_image_alt = NULL, homepage_image_type = NULL,
+               homepage_image_updated_at = NULL, updated_by = $1
+           WHERE id = true AND homepage_image IS NOT NULL`,
+          [req.user.id],
+        )
+        if (updated.rowCount) {
+          await appendAudit(client, req.user.id, "site.homepage_image_removed", "site_settings")
+        }
+      })
+      res.status(204).end()
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.patch("/api/counselor/profile", requireAuth, requireRole("counselor"), async (req, res, next) => {
     const input = validateBody(
       z.object({
         displayName: z.string().trim().min(1).max(80),
-        headline: z.string().trim().min(1).max(120),
-        bio: z.string().trim().max(1000),
-        areas: z.array(z.string().trim().min(1).max(80)).max(20),
-        languages: z.array(z.string().trim().min(1).max(60)).max(10),
+        headline: z.string().trim().max(120),
+        bio: z.string().trim().max(5000),
+        areas: z.array(z.string().trim().min(1).max(80)).max(12),
+        languages: z.array(z.string().trim().min(1).max(80)).max(12),
+        professionalTitle: optionalText(120),
+        highestQualification: optionalText(180),
+        institution: optionalText(180),
+        qualificationType: optionalText(120),
+        completionYear: z.number().int().min(1900).max(2100).nullable(),
+        certifications: optionalText(3000),
+        yearsExperience: z.number().int().min(0).max(80).nullable(),
+        licenseNumber: optionalText(160),
+        licensingAuthority: optionalText(180),
+        licenseExpiry: z.string().date().nullable(),
+        workHistory: optionalText(5000),
+        referencesText: optionalText(3000),
       }),
       req,
       res,
@@ -1076,8 +1414,105 @@ export function createApp({
           `UPDATE counselor_profiles
            SET headline = $2, bio = $3, areas = $4, languages = $5, updated_at = now()
            WHERE user_id = $1`,
-          [req.user.id, input.headline, input.bio, input.areas, input.languages],
+          [req.user.id, input.headline || "Counselor", input.bio, input.areas, input.languages],
         )
+        const application = await client.query(
+          `UPDATE counselor_applications
+           SET professional_title = $2,
+               highest_qualification = $3,
+               institution = $4,
+               qualification_type = $5,
+               completion_year = $6,
+               certifications = $7,
+               years_experience = $8,
+               license_number = $9,
+               licensing_authority = $10,
+               license_expiry = $11,
+               biography = $12,
+               areas_of_expertise = $13,
+               languages = $14,
+               work_history = $15,
+               references_text = $16,
+               qualification_verified = CASE
+                 WHEN (highest_qualification, institution, qualification_type, completion_year)
+                   IS DISTINCT FROM ($3, $4, $5, $6) THEN false
+                 ELSE qualification_verified
+               END,
+               license_verified = CASE
+                 WHEN (license_number, licensing_authority, license_expiry)
+                   IS DISTINCT FROM ($9, $10, $11) THEN false
+                 ELSE license_verified
+               END,
+               updated_at = now()
+           WHERE user_id = $1 AND status = 'APPROVED'
+           RETURNING id`,
+          [
+            req.user.id,
+            input.professionalTitle,
+            input.highestQualification,
+            input.institution,
+            input.qualificationType,
+            input.completionYear,
+            input.certifications,
+            input.yearsExperience,
+            input.licenseNumber,
+            input.licensingAuthority,
+            input.licenseExpiry,
+            input.bio || null,
+            input.areas,
+            input.languages,
+            input.workHistory,
+            input.referencesText,
+          ],
+        )
+        if (!application.rowCount) throw new Error("Approved counselor application was not found.")
+        if (input.highestQualification && input.institution && input.qualificationType) {
+          const existing = await client.query(
+            `UPDATE counselor_qualifications
+             SET qualification = $2, institution = $3, qualification_type = $4,
+                 completion_year = $5, verification_status = CASE
+                   WHEN (qualification, institution, qualification_type, completion_year)
+                     IS DISTINCT FROM ($2, $3, $4, $5) THEN 'unverified'
+                   ELSE verification_status
+                 END,
+                 verified_at = CASE
+                   WHEN (qualification, institution, qualification_type, completion_year)
+                     IS DISTINCT FROM ($2, $3, $4, $5) THEN NULL
+                   ELSE verified_at
+                 END,
+                 verified_by = CASE
+                   WHEN (qualification, institution, qualification_type, completion_year)
+                     IS DISTINCT FROM ($2, $3, $4, $5) THEN NULL
+                   ELSE verified_by
+                 END
+             WHERE id = (
+               SELECT id FROM counselor_qualifications
+               WHERE application_id = $1 ORDER BY created_at LIMIT 1
+             )
+             RETURNING id`,
+            [
+              application.rows[0].id,
+              input.highestQualification,
+              input.institution,
+              input.qualificationType,
+              input.completionYear,
+            ],
+          )
+          if (!existing.rowCount) {
+            await client.query(
+              `INSERT INTO counselor_qualifications
+                 (application_id, qualification, institution, qualification_type, completion_year)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [
+                application.rows[0].id,
+                input.highestQualification,
+                input.institution,
+                input.qualificationType,
+                input.completionYear,
+              ],
+            )
+          }
+        }
         await appendAudit(client, req.user.id, "counselor.profile_updated", "user", req.user.id)
       })
       res.json({ updated: true })
@@ -1089,20 +1524,106 @@ export function createApp({
   app.get("/api/counselor/profile", requireAuth, requireRole("counselor"), async (req, res, next) => {
     try {
       const result = await pool.query(
-        `SELECT p.display_name, c.headline, c.bio, c.areas, c.languages, c.approved
+        `SELECT p.display_name, c.headline, c.bio, c.areas, c.languages, c.approved,
+                a.public_ref,
+                a.id AS application_id, a.professional_title, a.highest_qualification,
+                a.institution, a.qualification_type, a.completion_year, a.certifications,
+                a.years_experience, a.license_number, a.licensing_authority, a.license_expiry,
+                a.work_history, a.references_text, a.qualification_verified, a.license_verified
          FROM counselor_profiles c
          JOIN user_profiles p ON p.user_id = c.user_id
+         JOIN counselor_applications a ON a.user_id = c.user_id AND a.status = 'APPROVED'
          WHERE c.user_id = $1`,
         [req.user.id],
       )
       if (!result.rows[0]) {
         return res.status(404).json({ error: "Counselor profile was not found." })
       }
-      res.json({ profile: result.rows[0] })
+      const documents = await pool.query(
+        `SELECT id, category, status, original_name, mime_type, byte_size, uploaded_at, requested_at
+         FROM counselor_documents WHERE application_id = $1 ORDER BY created_at`,
+        [result.rows[0].application_id],
+      )
+      const { application_id: _applicationId, ...profile } = result.rows[0]
+      res.json({ profile: { ...profile, documents: documents.rows.map(publicDocumentMetadata) } })
     } catch (error) {
       next(error)
     }
   })
+
+  app.post(
+    "/api/counselor/profile/documents",
+    requireAuth,
+    requireRole("counselor"),
+    documentUpload.fields([
+      { name: "qualificationDocuments", maxCount: 5 },
+      { name: "licenseDocuments", maxCount: 5 },
+      { name: "supportingDocuments", maxCount: 5 },
+      { name: "profilePhoto", maxCount: 1 },
+    ]),
+    async (req, res, next) => {
+      const categoryByField = {
+        qualificationDocuments: "qualification",
+        licenseDocuments: "license",
+        supportingDocuments: "supporting",
+        profilePhoto: "profile_photo",
+      }
+      const files = uploadedFiles(req.files)
+      if (!files.length) return res.status(400).json({ error: "Select at least one profile document to upload." })
+      const preparedFiles = files.map((file) => ({
+        file,
+        category: categoryByField[file.fieldname],
+        mimeType: validateDocumentFile(file, categoryByField[file.fieldname]),
+      }))
+      if (preparedFiles.some(({ mimeType }) => !mimeType)) {
+        return res.status(400).json({
+          error: "Documents must be valid PDF, JPEG, or PNG files; profile photos must be images.",
+        })
+      }
+
+      const storedKeys = []
+      try {
+        const documents = await inTransaction(pool, async (client) => {
+          const application = await client.query(
+            `SELECT a.id FROM counselor_applications a
+             JOIN counselor_profiles c ON c.user_id = a.user_id AND c.approved = true
+             WHERE a.user_id = $1 AND a.status = 'APPROVED' FOR UPDATE OF a`,
+            [req.user.id],
+          )
+          if (!application.rows[0]) return null
+          const uploaded = []
+          for (const item of preparedFiles) {
+            const storageKey = await savePrivateDocument(item.file, privateDocumentPath)
+            storedKeys.push(storageKey)
+            const result = await client.query(
+              `INSERT INTO counselor_documents
+                 (application_id, category, status, storage_key, original_name,
+                  mime_type, byte_size, uploaded_by, uploaded_at)
+               VALUES ($1, $2, 'uploaded', $3, $4, $5, $6, $7, now())
+               RETURNING id, category, status, original_name, mime_type, byte_size, uploaded_at, requested_at`,
+              [
+                application.rows[0].id,
+                item.category,
+                storageKey,
+                safeDocumentName(item.file.originalname),
+                item.mimeType,
+                item.file.size,
+                req.user.id,
+              ],
+            )
+            uploaded.push(publicDocumentMetadata(result.rows[0]))
+          }
+          await appendAudit(client, req.user.id, "counselor.profile_documents_uploaded", "counselor_application", application.rows[0].id)
+          return uploaded
+        })
+        if (!documents) return res.status(409).json({ error: "Only approved counselors can update profile documents." })
+        res.status(201).json({ documents })
+      } catch (error) {
+        if (storedKeys.length) await removePrivateDocuments(storedKeys, privateDocumentPath)
+        next(error)
+      }
+    },
+  )
 
   app.get("/api/requests", requireAuth, async (req, res, next) => {
     if (
@@ -1519,6 +2040,21 @@ export function createApp({
         account_status: accountStatus,
         display_name: displayName,
       } = application
+      const requestedDocumentCategories = reviews.rows.flatMap((row) =>
+        Array.isArray(row.requested_document_categories)
+          ? row.requested_document_categories
+          : [],
+      )
+      const fallbackDocuments = requestedDocumentCategories.map((category, index) => ({
+        id: `${publicRef}-${category}-${index}`,
+        category,
+        status: "requested",
+        original_name: null,
+        mime_type: null,
+        byte_size: null,
+        uploaded_at: null,
+        requested_at: reviews.rows[0]?.created_at || null,
+      }))
       res.json({
         application: {
           publicRef,
@@ -1546,8 +2082,8 @@ export function createApp({
           licensingAuthority,
           licenseExpiry,
           biography,
-          areasOfExpertise,
-          languages,
+          areasOfExpertise: areasOfExpertise || [],
+          languages: languages || [],
           workHistory,
           referencesText,
           codeOfConductAccepted,
@@ -1555,7 +2091,9 @@ export function createApp({
           safeguardingAccepted,
           qualificationVerified,
           licenseVerified,
-          documents: documents.rows.map(publicDocumentMetadata),
+          documents: documents.rows.length
+            ? documents.rows.map(publicDocumentMetadata)
+            : fallbackDocuments.map(publicDocumentMetadata),
           qualifications: qualifications.rows.map((row) => ({
             id: row.id,
             qualification: row.qualification,
@@ -1612,7 +2150,7 @@ export function createApp({
           )
           const record = qualification.rows[0]
           if (!record) return { missing: true }
-          if (["APPROVED", "REJECTED"].includes(record.status)) return { conflict: true }
+          if (record.status === "REJECTED") return { conflict: true }
           await client.query(
             `UPDATE counselor_qualifications SET verification_status = $2,
                verified_by = $3, verified_at = CASE WHEN $4 THEN now() ELSE NULL END,
@@ -1652,7 +2190,7 @@ export function createApp({
           return { verified: input.verified }
         })
         if (result.missing) return res.status(404).json({ error: "The requested record was not found." })
-        if (result.conflict) return res.status(409).json({ error: "Credentials cannot be changed after a final application decision." })
+        if (result.conflict) return res.status(409).json({ error: "Credentials cannot be changed after an application is rejected." })
         res.json({ qualification: result })
       } catch (error) {
         next(error)
@@ -1683,7 +2221,7 @@ export function createApp({
           )
           const application = found.rows[0]
           if (!application) return { missing: true }
-          if (["APPROVED", "REJECTED"].includes(application.status)) return { conflict: true }
+          if (application.status === "REJECTED") return { conflict: true }
           if (!application.license_number && input.verified) return { noLicense: true }
           await client.query(
             `UPDATE counselor_applications SET license_verified = $2, updated_at = now()
@@ -1711,7 +2249,7 @@ export function createApp({
           return { verified: input.verified }
         })
         if (result.missing) return res.status(404).json({ error: "The requested record was not found." })
-        if (result.conflict) return res.status(409).json({ error: "Credentials cannot be changed after a final application decision." })
+        if (result.conflict) return res.status(409).json({ error: "Credentials cannot be changed after an application is rejected." })
         if (result.noLicense) return res.status(409).json({ error: "No license was supplied for verification." })
         res.json({ license: result })
       } catch (error) {
@@ -1728,7 +2266,7 @@ export function createApp({
       const input = validateBody(
         z.object({
           action: z.enum(["UNDER_REVIEW", "MORE_INFORMATION_REQUIRED", "APPROVED", "REJECTED"]),
-          reason: z.string().trim().min(5).max(3000),
+          reason: z.string().trim().max(3000).optional(),
           requestedDocumentCategories: z.array(
             z.enum(["qualification", "license", "supporting"]),
           ).max(3).default([]),
@@ -1737,9 +2275,13 @@ export function createApp({
         res,
       )
       if (!input) return
-      if (input.action === "MORE_INFORMATION_REQUIRED" && !input.reason.trim()) {
-        return res.status(400).json({ error: "Provide the information required from the applicant." })
+      if (
+        ["MORE_INFORMATION_REQUIRED", "REJECTED", "UNDER_REVIEW"].includes(input.action) &&
+        (input.reason || "").trim().length < 5
+      ) {
+        return res.status(400).json({ error: "Provide a reason for this application decision." })
       }
+      const reason = input.reason?.trim() || "Counselor application approved."
       try {
         const result = await inTransaction(pool, async (client) => {
           const found = await client.query(
@@ -1756,13 +2298,13 @@ export function createApp({
             !["PENDING_APPROVAL", "MORE_INFORMATION_REQUIRED"].includes(application.status)) {
             return { conflict: true }
           }
+          if (input.action === "MORE_INFORMATION_REQUIRED" &&
+            !["PENDING_APPROVAL", "UNDER_REVIEW", "MORE_INFORMATION_REQUIRED"].includes(application.status)) {
+            return { conflict: true }
+          }
           if (input.action === "APPROVED") {
-            if (application.status !== "UNDER_REVIEW") return { conflict: true }
-            if (
-              !application.qualification_verified ||
-              (application.license_number && !application.license_verified)
-            ) {
-              return { verificationRequired: true }
+            if (!["PENDING_APPROVAL", "UNDER_REVIEW", "MORE_INFORMATION_REQUIRED"].includes(application.status)) {
+              return { conflict: true }
             }
             if (application.account_status !== "active") return { suspended: true }
           }
@@ -1790,10 +2332,10 @@ export function createApp({
                  updated_at = now()`,
               [
                 application.user_id,
-                application.professional_title,
-                application.biography,
-                application.areas_of_expertise,
-                application.languages,
+                application.professional_title || application.specialization,
+                application.biography || "",
+                application.areas_of_expertise || [],
+                application.languages || [],
               ],
             )
             await client.query(
@@ -1822,7 +2364,7 @@ export function createApp({
               input.action === "MORE_INFORMATION_REQUIRED"
                 ? "REQUESTED_MORE_INFORMATION"
                 : input.action,
-              input.reason,
+              reason,
               input.action === "MORE_INFORMATION_REQUIRED"
                 ? input.requestedDocumentCategories
                 : [],
@@ -1841,7 +2383,7 @@ export function createApp({
                   : input.action === "MORE_INFORMATION_REQUIRED"
                     ? "More information requested"
                     : "Counselor application under review",
-              input.reason,
+              reason,
             ],
           )
           await appendAudit(
@@ -1857,9 +2399,6 @@ export function createApp({
         if (result.missing) return res.status(404).json({ error: "The requested record was not found." })
         if (result.selfReview) return res.status(403).json({ error: "Administrators may not review their own application." })
         if (result.conflict) return res.status(409).json({ error: "That application decision is not allowed in its current state." })
-        if (result.verificationRequired) {
-          return res.status(409).json({ error: "Verify the required qualifications and any supplied license before approval." })
-        }
         if (result.suspended) return res.status(409).json({ error: "Suspended applicants cannot be approved." })
         res.json({ application: result })
       } catch (error) {
@@ -2043,7 +2582,7 @@ export function createApp({
 
   app.patch("/api/admin/counselors/:publicId/approval", requireAuth, requireAdmin, async (req, res, next) => {
     res.status(409).json({
-      error: "Direct counselor approval is disabled. Review the counselor application and verify credentials first.",
+      error: "Direct counselor approval is disabled. Review the counselor application first.",
     })
   })
 
