@@ -1,18 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
-import type { Role } from "../data"
-import { useApp } from "../app/state"
-import { api } from "../lib/api"
+import { api, apiUrl } from "../lib/api"
 import { account, setAccountUser } from "../lib/account"
 import BaseButton from "./BaseButton.vue"
 import Brand from "./Brand.vue"
 import Icon from "./Icon.vue"
+import NotificationMenu from "./NotificationMenu.vue"
+import ProfileAvatar from "./ProfileAvatar.vue"
 import Notice from "./Notice.vue"
 
 defineProps<{ title: string; eyebrow?: string }>()
 
-const { state, setRole } = useApp()
 const route = useRoute()
 const router = useRouter()
 const open = ref(false)
@@ -54,7 +53,6 @@ const navigation = [
   { to: "/settings", label: "Account settings", icon: "Settings", roles: ["seeker", "counselor", "admin", "applicant"] },
 ]
 const currentRole = computed(() => {
-  if (state.demo) return state.role
   if (
     account.user?.accountType === "counselor" &&
     account.user.role === "registered"
@@ -64,7 +62,6 @@ const currentRole = computed(() => {
   return "seeker"
 })
 const pageAccess = computed(() => {
-  if (state.demo) return "allowed"
   const routeName = String(route.name || "")
   const protectedPages = new Set([
     "seeker-dashboard",
@@ -124,14 +121,6 @@ watch(
   },
 )
 
-function switchRole(event: Event) {
-  const role = (event.target as HTMLSelectElement).value as Role
-  setRole(role)
-  void router.push(
-    role === "seeker" ? "/app" : role === "counselor" ? "/counselor" : "/admin",
-  )
-}
-
 function quickExit() {
   sessionStorage.clear()
   void router.replace("/safe")
@@ -142,8 +131,6 @@ async function signOut() {
   try {
     await api<void>("/auth/logout", { method: "POST" })
     setAccountUser(null)
-    state.demo = false
-    localStorage.removeItem("sc-demo")
     await router.push("/sign-in")
   } catch (error) {
     logoutError.value =
@@ -166,7 +153,6 @@ async function signOut() {
           <Icon name="X" :size="20" />
         </BaseButton>
       </div>
-      <div v-if="state.demo" class="demo-label"><span /> Demo workspace</div>
       <nav class="sidebar-nav" aria-label="Primary">
         <RouterLink
           v-for="item in items"
@@ -181,24 +167,17 @@ async function signOut() {
         </RouterLink>
       </nav>
       <div class="sidebar-foot">
-        <label v-if="state.demo" class="role-switch">
-          <span>Preview role</span>
-          <div>
-            <Icon name="UserRound" :size="17" />
-            <select :value="state.role" @change="switchRole">
-              <option value="seeker">Seeker</option>
-              <option value="counselor">Counselor</option>
-              <option value="admin">Administrator</option>
-            </select>
-            <Icon name="ChevronDown" :size="15" />
-          </div>
-        </label>
-        <div v-else-if="account.user" class="account-identity">
+        <div v-if="account.user" class="account-identity">
+          <ProfileAvatar
+            :src="account.profilePictureUrl ? apiUrl(account.profilePictureUrl) : null"
+            :name="account.user.displayName || account.user.publicId"
+            size="small"
+          />
           <strong>{{ account.user.displayName || "Private account" }}</strong>
           <span>{{ account.user.publicId }}</span>
         </div>
         <p v-if="logoutError" class="form-error" role="alert">{{ logoutError }}</p>
-        <button v-if="account.user && !state.demo" class="quick-exit" @click="signOut">
+        <button v-if="account.user" class="quick-exit" @click="signOut">
           <Icon name="LogOut" :size="18" /> Sign out
         </button>
         <button class="quick-exit" @click="quickExit">
@@ -227,14 +206,11 @@ async function signOut() {
         </div>
         <div class="header-actions">
           <slot name="action" />
-          <button class="icon-button" aria-label="Notifications">
-            <Icon name="Bell" :size="20" />
-            <i />
-          </button>
+          <NotificationMenu />
         </div>
       </header>
       <div :key="route.path" class="app-content">
-        <Notice v-if="account.error && !state.demo" title="Account connection issue" tone="warning">
+        <Notice v-if="account.error" title="Account connection issue" tone="warning">
           {{ account.error }}
         </Notice>
         <div v-if="pageAccess === 'checking'" class="empty-state" role="status">

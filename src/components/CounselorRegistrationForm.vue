@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { reactive, ref } from "vue"
+import { onBeforeUnmount, reactive, ref } from "vue"
 
 import BaseButton from "./BaseButton.vue"
 import Field from "./Field.vue"
 import Icon from "./Icon.vue"
 import Notice from "./Notice.vue"
+import ProfileAvatar from "./ProfileAvatar.vue"
 
 const props = defineProps<{
   busy: boolean
@@ -26,6 +27,36 @@ const fields = reactive({
   safeguardingAccepted: false,
 })
 const showPassword = ref(false)
+const profilePicture = ref<File | null>(null)
+const profilePicturePreview = ref<string | null>(null)
+const pictureError = ref("")
+
+function selectProfilePicture(event: Event) {
+  const input = event.currentTarget
+  if (!(input instanceof HTMLInputElement)) return
+  const file = input.files?.[0] || null
+  pictureError.value = ""
+  if (profilePicturePreview.value) URL.revokeObjectURL(profilePicturePreview.value)
+  profilePicturePreview.value = null
+  profilePicture.value = null
+  if (!file) return
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    pictureError.value = "Choose a JPEG, PNG, or WebP image."
+    input.value = ""
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    pictureError.value = "Profile pictures must be 5 MB or smaller."
+    input.value = ""
+    return
+  }
+  profilePicture.value = file
+  profilePicturePreview.value = URL.createObjectURL(file)
+}
+
+onBeforeUnmount(() => {
+  if (profilePicturePreview.value) URL.revokeObjectURL(profilePicturePreview.value)
+})
 
 function submit(event: Event) {
   const form = event.currentTarget
@@ -49,6 +80,7 @@ function submit(event: Event) {
           }),
     }),
   )
+  if (profilePicture.value) payload.set("profilePicture", profilePicture.value)
   emit("submit", payload, Boolean(props.existingAccount))
 }
 </script>
@@ -75,6 +107,20 @@ function submit(event: Event) {
       <Field label="Counseling specialization or area of interest">
         <input v-model="fields.specialization" class="control" required maxlength="160" />
       </Field>
+      <Field v-if="!props.existingAccount" label="Profile picture — optional" hint="JPEG, PNG, or WebP; up to 5 MB. You can change or remove it later.">
+        <div class="profile-picture-field">
+          <ProfileAvatar
+            v-if="profilePicturePreview"
+            class="profile-picture-preview"
+            :src="profilePicturePreview"
+            :name="fields.preferredDisplayName || fields.fullLegalName || 'Your profile'"
+            size="medium"
+          />
+          <span v-else class="profile-picture-preview profile-picture-placeholder"><Icon name="UserRound" :size="24" /></span>
+          <input class="control file-control" type="file" accept="image/jpeg,image/png,image/webp" @change="selectProfilePicture" />
+        </div>
+      </Field>
+      <p v-if="pictureError" class="form-error" role="alert">{{ pictureError }}</p>
     </div>
 
     <Field v-if="!props.existingAccount" label="Password" hint="Use at least 12 characters.">

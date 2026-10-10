@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
-import { counselors, journeyStages, needs } from "./data"
+import { journeyStages, needs } from "./data"
 import { api, apiUrl, type AccountUser, type AuthResponse } from "./lib/api"
 import { account, refreshAccount, setAccountUser } from "./lib/account"
 import { useApp, type RequestStatus } from "./app/state"
@@ -13,6 +13,7 @@ import CounselorRegistrationForm from "./components/CounselorRegistrationForm.vu
 import Field from "./components/Field.vue"
 import Icon from "./components/Icon.vue"
 import Notice from "./components/Notice.vue"
+import ProfileAvatar from "./components/ProfileAvatar.vue"
 
 const route = useRoute()
 const router = useRouter()
@@ -107,36 +108,54 @@ type CounselorNotification = {
   created_at: string
   read_at: string | null
 }
+type LiveConversation = {
+  public_id: string
+  status: string
+  updated_at: string
+  other_party_public_id: string
+  other_party_display_name: string
+}
+type LiveMessage = {
+  id: string
+  body: string
+  created_at: string
+  edited_at: string | null
+  deleted_at: string | null
+  delivered_at: string | null
+  read_at: string | null
+  sender_public_id: string
+  sender_display_name: string
+}
 const {
   state,
-  request,
-  setDemo,
   setAccessMode,
   setNeed,
-  resetDemo,
-  createRequest,
-  updateRequest,
-  sendMessage,
-  toggleResource,
-  setJourneyStage,
 } = useApp()
+const request = computed(() => state.request)
+const messagesElement = ref<HTMLElement | null>(null)
 
-const selectedCounselor = computed(
-  () =>
-    displayedCounselors.value.find(
-      (item) => item.id === route.params.id || item.publicId === route.params.id,
-    ) ||
-    displayedCounselors.value[0] ||
-    counselors[0],
+const selectedCounselor = computed(() =>
+  displayedCounselors.value.find(
+    (item) => item.id === route.params.id || item.publicId === route.params.id,
+  ) || null,
 )
 const privacyChoice = ref(state.accessMode)
 const counselorSearch = ref("")
 const languageFilter = ref("All languages")
-type CounselorCard = (typeof counselors)[number] & { publicId?: string }
+type CounselorCard = {
+  id: string
+  publicId: string
+  name: string
+  initials: string
+  title: string
+  bio: string
+  areas: string[]
+  language: string
+  color: string
+}
 const liveCounselors = ref<CounselorCard[]>([])
-const displayedCounselors = computed<CounselorCard[]>(() =>
-  account.user && !state.demo ? liveCounselors.value : counselors,
-)
+const counselorLoadError = ref("")
+const displayedCounselors = computed<CounselorCard[]>(() => liveCounselors.value)
 const languageOptions = computed(() => [
   ...new Set(displayedCounselors.value.flatMap((counselor) => counselor.language.split(", "))),
 ])
@@ -163,6 +182,9 @@ const accountType = ref<"registered" | "anonymous" | "counselor">("registered")
 const accountName = ref("")
 const email = ref("")
 const password = ref("")
+const registrationPicture = ref<File | null>(null)
+const registrationPicturePreview = ref<string | null>(null)
+const registrationPictureError = ref("")
 const registrationConsent = ref(false)
 const publicId = ref("")
 const recoveryPublicId = ref("")
@@ -178,6 +200,10 @@ const recoveryCopied = ref(false)
 const profileStatus = ref("")
 const profileLoading = ref(false)
 const displayNameDraft = ref("")
+const profileBioDraft = ref("")
+const selectedProfilePicture = ref<File | null>(null)
+const selectedProfilePicturePreview = ref<string | null>(null)
+const profilePictureError = ref("")
 const currentPassword = ref("")
 const newAccountPassword = ref("")
 const confirmAccountPassword = ref("")
@@ -219,7 +245,16 @@ const counselorDocumentStatus = ref("")
 const counselorProfileApplicationRef = ref("")
 const chatError = ref("")
 const counselorCases = ref<Array<Record<string, string | null>>>([])
-const realConversations = ref<Array<Record<string, string | null>>>([])
+const realConversations = ref<LiveConversation[]>([])
+const realMessages = ref<LiveMessage[]>([])
+let messageLoadSequence = 0
+let messagePollTimer: number | undefined
+let messagePollInFlight = false
+let followLatestMessages = true
+const messageSending = ref(false)
+const editingMessageId = ref("")
+const editDraft = ref("")
+const messageActionError = ref("")
 const realJourney = ref<Record<string, string>>({})
 const currentConversation = ref<{
   publicId: string
@@ -227,6 +262,28 @@ const currentConversation = ref<{
   otherPartyName: string | null
   status: string
 } | null>(null)
+const conversationMessages = computed(() =>
+  realMessages.value.map((message) => {
+    const own = isOwnMessage(message.sender_public_id)
+    return {
+      id: message.id,
+      record: message,
+      own,
+      sender: own ? "You" : message.sender_display_name,
+      text: message.body,
+      time: messageTime(message.created_at),
+      edited: Boolean(message.edited_at),
+      deleted: Boolean(message.deleted_at),
+      status: own
+        ? message.read_at
+          ? "read"
+          : message.delivered_at
+            ? "delivered"
+            : "sent"
+        : null,
+    }
+  }),
+)
 const realAdminUsers = ref<Array<{
   publicId: string
   accountType: string
@@ -265,36 +322,20 @@ const reportLoading = ref(false)
 
 const adminTab = ref("Counselors")
 const adminSearch = ref("")
-const adminStatus = ref("All statuses")
-const adminRows = [
-  { name: "Sarah K.", areas: "Prayer, spiritual growth", approval: "Approved", availability: "Available", color: "mint" },
-  { name: "John D.", areas: "Relationships, marriage", approval: "Approved", availability: "Limited", color: "gold" },
-  { name: "Mary T.", areas: "Bible study, discipleship", approval: "Approved", availability: "Available", color: "blue" },
-  { name: "Samuel B.", areas: "Youth, school & career", approval: "Pending review", availability: "Unavailable", color: "blue" },
-]
-const filteredAdminRows = computed(() =>
-  adminRows.filter(
-    (row) =>
-      (!adminSearch.value ||
-        `${row.name} ${row.areas}`.toLowerCase().includes(adminSearch.value.toLowerCase())) &&
-      (adminStatus.value === "All statuses" || row.approval === adminStatus.value),
-  ),
-)
 
 const dashboardTitle = computed(() =>
   account.user?.displayName
     ? `Welcome, ${account.user.displayName}`
     : account.user?.accountType === "anonymous"
       ? "Your private space"
-      : "Good morning, Friend",
+      : "Your ShepherdConnect home",
 )
 const currentJourneyStage = computed(() => {
-  if (!account.user || state.demo) return state.journeyStage
   const stagesForUser = journeyStages.map((stage) => realJourney.value[stage.name])
   const active = stagesForUser.lastIndexOf("in_progress")
   if (active >= 0) return active
   const completed = stagesForUser.lastIndexOf("completed")
-  return Math.min(completed + 1, journeyStages.length - 1)
+  return completed >= 0 ? Math.min(completed + 1, journeyStages.length - 1) : null
 })
 
 const adminSearchResults = computed(() =>
@@ -330,52 +371,13 @@ const filteredAdminApplications = computed(() =>
   ),
 )
 
-const resources = [
-  {
-    id: "peace",
-    type: "Today’s Scripture",
-    icon: "BookOpen",
-    title: "Philippians 4:6–7",
-    body: "Do not be anxious about anything, but in every situation, by prayer and petition, with thanksgiving, present your requests to God.",
-    prompt: "What is God inviting you to trust Him with today?",
-  },
-  {
-    id: "wisdom",
-    type: "Reflection",
-    icon: "Sparkles",
-    title: "A wise next step",
-    body: "If any of you lacks wisdom, you should ask God, who gives generously to all without finding fault.",
-    prompt: "What is one faithful action you can take this week?",
-  },
-  {
-    id: "prayer",
-    type: "Prayer guide",
-    icon: "Heart",
-    title: "A simple prayer for peace",
-    body: "Father, meet me in this moment. Give me wisdom for what I can change and peace with what I cannot.",
-    prompt: "Read slowly, then add your own words.",
-  },
-]
-const adminTabs = ["Counselor Applications", "Counselors", "Users", "Resources", "Safeguarding", "Settings"]
+const adminTabs = ["Counselor Applications", "Counselors", "Users", "Safeguarding", "Settings"]
 const adminTabDescriptions: Record<string, string> = {
   "Counselor Applications": "Review essential profile information and approve access; verify optional credentials separately when provided.",
   Users: "Manage account status without routine access to counseling content.",
-  Resources: "Approve Scripture references and discipleship resources before sharing.",
   Safeguarding: "Restricted case triage requires a separate safeguarding permission.",
   Settings: "Manage public homepage artwork and permitted site configuration.",
 }
-const reportBars = [
-  { label: "Week 1", total: 42, accepted: 30 },
-  { label: "Week 2", total: 58, accepted: 44 },
-  { label: "Week 3", total: 47, accepted: 38 },
-  { label: "Week 4", total: 69, accepted: 55 },
-]
-const reportNeeds = [
-  { label: "Prayer & spiritual growth", value: 38 },
-  { label: "Relationships / marriage", value: 27 },
-  { label: "Personal growth", value: 18 },
-  { label: "Bible questions", value: 12 },
-]
 
 function go(path: string) {
   void router.push(path)
@@ -395,30 +397,34 @@ function homeFor(user: AccountUser | null = account.user) {
 }
 
 async function loadCounselors() {
-  const result = await api<{ counselors: Array<{
-    publicId: string
-    displayName: string | null
-    headline: string
-    bio: string
-    areas: string[]
-    languages: string[]
-  }> }>("/counselors")
-  liveCounselors.value = result.counselors.map((item, index) => {
-    const name = item.displayName || item.publicId
-    return {
-      id: item.publicId,
-      publicId: item.publicId,
-      name,
-      initials: counselorInitials(name),
-      title: item.headline,
-      bio: item.bio || "This counselor has not added a profile introduction yet.",
-      areas: item.areas,
-      language: item.languages.length ? item.languages.join(", ") : "Not listed",
-      availability: "Availability varies",
-      youth: false,
-      color: ["mint", "gold", "blue"][index % 3],
-    }
-  })
+  counselorLoadError.value = ""
+  try {
+    const result = await api<{ counselors: Array<{
+      publicId: string
+      displayName: string | null
+      headline: string
+      bio: string
+      areas: string[]
+      languages: string[]
+    }> }>("/counselors")
+    liveCounselors.value = result.counselors.map((item, index) => {
+      const name = item.displayName || item.publicId
+      return {
+        id: item.publicId,
+        publicId: item.publicId,
+        name,
+        initials: counselorInitials(name),
+        title: item.headline,
+        bio: item.bio,
+        areas: item.areas,
+        language: item.languages.join(", "),
+        color: ["mint", "gold", "blue"][index % 3],
+      }
+    })
+  } catch (error) {
+    counselorLoadError.value =
+      error instanceof Error ? error.message : "Approved counselor profiles could not be loaded."
+  }
 }
 
 async function loadAdminUsers(role?: string) {
@@ -639,6 +645,7 @@ async function loadAccountData() {
     state.request = null
     currentConversation.value = null
     realConversations.value = []
+    realMessages.value = []
     await loadCounselorApplication()
     return
   }
@@ -646,7 +653,7 @@ async function loadAccountData() {
   if (user.role === "anonymous" || user.role === "registered") {
     const [requestResult, conversationResult, journeyResult] = await Promise.all([
       api<{ requests: Array<Record<string, string>> }>("/requests"),
-      api<{ conversations: Array<Record<string, string | null>> }>("/conversations"),
+      api<{ conversations: LiveConversation[] }>("/conversations"),
       api<{ progress: Array<{ stage: string; status: string }> }>("/journey"),
     ])
     const latest = requestResult.requests[0]
@@ -662,28 +669,29 @@ async function loadAccountData() {
         }
       : null
     realConversations.value = conversationResult.conversations
-    const conversation = conversationResult.conversations[0]
+    const conversation =
+      conversationResult.conversations.find(
+        (item) => item.public_id === currentConversation.value?.publicId,
+      ) || conversationResult.conversations[0]
     currentConversation.value = conversation
       ? {
-          publicId: String(conversation.public_id),
-          otherPartyPublicId: String(conversation.other_party_public_id),
-          otherPartyName: conversation.other_party_display_name
-            ? String(conversation.other_party_display_name)
-            : null,
-          status: String(conversation.status),
+          publicId: conversation.public_id,
+          otherPartyPublicId: conversation.other_party_public_id,
+          otherPartyName: conversation.other_party_display_name,
+          status: conversation.status,
         }
       : null
+    if (!conversation) realMessages.value = []
     realJourney.value = Object.fromEntries(
       journeyResult.progress.map((item) => [item.stage, item.status]),
     )
     const activeStage = journeyStages
       .map((stage) => realJourney.value[stage.name])
       .lastIndexOf("in_progress")
-    if (activeStage >= 0) setJourneyStage(activeStage)
   } else if (user.role === "counselor") {
     const [caseResult, conversationResult, profileResult] = await Promise.all([
       api<{ cases: Array<Record<string, string | null>> }>("/counselor/cases"),
-      api<{ conversations: Array<Record<string, string | null>> }>("/conversations"),
+      api<{ conversations: LiveConversation[] }>("/conversations"),
       api<{ profile: {
         public_ref: string
         headline: string
@@ -725,17 +733,19 @@ async function loadAccountData() {
     counselorWorkHistory.value = profileResult.profile.work_history || ""
     counselorReferences.value = profileResult.profile.references_text || ""
     counselorProfileDocuments.value = profileResult.profile.documents
-    const conversation = conversationResult.conversations[0]
+    const conversation =
+      conversationResult.conversations.find(
+        (item) => item.public_id === currentConversation.value?.publicId,
+      ) || conversationResult.conversations[0]
     currentConversation.value = conversation
       ? {
-          publicId: String(conversation.public_id),
-          otherPartyPublicId: String(conversation.other_party_public_id),
-          otherPartyName: conversation.other_party_display_name
-            ? String(conversation.other_party_display_name)
-            : null,
-          status: String(conversation.status),
+          publicId: conversation.public_id,
+          otherPartyPublicId: conversation.other_party_public_id,
+          otherPartyName: conversation.other_party_display_name,
+          status: conversation.status,
         }
       : null
+    if (!conversation) realMessages.value = []
     const latest = caseResult.cases[0]
     state.request = latest
       ? {
@@ -751,9 +761,10 @@ async function loadAccountData() {
   } else {
     state.request = null
     currentConversation.value = null
+    realMessages.value = []
   }
 
-  if (route.name === "counseling" && currentConversation.value?.status === "open") {
+  if (route.name === "counseling" && currentConversation.value) {
     await loadMessages(currentConversation.value.publicId)
   }
   if (user.role === "superadmin" && route.name === "admin") {
@@ -765,26 +776,22 @@ async function loadAccountData() {
 }
 
 async function changeRequestStatus(status: RequestStatus, publicRef?: string) {
-  if (account.user && !state.demo) {
-    const targetRef = publicRef || state.request?.reference
-    if (!targetRef) return
-    try {
-      const result = await api<{ request: { status: RequestStatus }; conversation?: string }>(
-        `/requests/${encodeURIComponent(targetRef)}/status`,
-        { method: "PATCH", body: JSON.stringify({ status }) },
-      )
-      if (state.request?.reference === targetRef) state.request.status = result.request.status
-      const targetCase = counselorCases.value.find((item) => item.public_ref === targetRef)
-      if (targetCase) targetCase.status = result.request.status
-      if (result.conversation) await loadAccountData()
-      if (status === "Accepted") go("/counseling")
-    } catch (error) {
-      requestError.value =
-        error instanceof Error ? error.message : "Request status could not be updated."
-    }
-    return
+  const targetRef = publicRef || state.request?.reference
+  if (!targetRef) return
+  try {
+    const result = await api<{ request: { status: RequestStatus }; conversation?: string }>(
+      `/requests/${encodeURIComponent(targetRef)}/status`,
+      { method: "PATCH", body: JSON.stringify({ status }) },
+    )
+    if (state.request?.reference === targetRef) state.request.status = result.request.status
+    const targetCase = counselorCases.value.find((item) => item.public_ref === targetRef)
+    if (targetCase) targetCase.status = result.request.status
+    if (result.conversation) await loadAccountData()
+    if (status === "Accepted") go("/counseling")
+  } catch (error) {
+    requestError.value =
+      error instanceof Error ? error.message : "Request status could not be updated."
   }
-  updateRequest(status)
 }
 
 async function updateAdminStatus(user: (typeof realAdminUsers.value)[number], status: string) {
@@ -958,13 +965,114 @@ async function saveDisplayName() {
     const displayName = displayNameDraft.value.trim() || null
     const result = await api<{ user: AccountUser }>("/me", {
       method: "PATCH",
-      body: JSON.stringify({ displayName }),
+      body: JSON.stringify({ displayName, bio: profileBioDraft.value }),
     })
     setAccountUser(result.user)
     profileStatus.value = "Account profile updated."
   } catch (error) {
     profileStatus.value =
       error instanceof Error ? error.message : "Account profile could not be saved."
+  } finally {
+    profileLoading.value = false
+  }
+}
+
+async function loadUserProfile() {
+  try {
+    const result = await api<{ profile: { bio: string; pictureUrl: string | null } }>("/me/profile")
+    profileBioDraft.value = result.profile.bio
+    account.profilePictureUrl = result.profile.pictureUrl
+  } catch (error) {
+    profileStatus.value =
+      error instanceof Error ? error.message : "Account profile could not be loaded."
+  }
+}
+
+function selectRegistrationPicture(event: Event) {
+  const input = event.currentTarget
+  if (!(input instanceof HTMLInputElement)) return
+  const file = input.files?.[0] || null
+  registrationPictureError.value = ""
+  if (registrationPicturePreview.value) URL.revokeObjectURL(registrationPicturePreview.value)
+  registrationPicturePreview.value = null
+  registrationPicture.value = null
+  if (!file) return
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    registrationPictureError.value = "Choose a JPEG, PNG, or WebP image."
+    input.value = ""
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    registrationPictureError.value = "Profile pictures must be 5 MB or smaller."
+    input.value = ""
+    return
+  }
+  registrationPicture.value = file
+  registrationPicturePreview.value = URL.createObjectURL(file)
+}
+
+function selectProfilePicture(event: Event) {
+  const input = event.currentTarget
+  if (!(input instanceof HTMLInputElement)) return
+  const file = input.files?.[0] || null
+  profilePictureError.value = ""
+  if (selectedProfilePicturePreview.value) URL.revokeObjectURL(selectedProfilePicturePreview.value)
+  selectedProfilePicturePreview.value = null
+  selectedProfilePicture.value = null
+  if (!file) return
+  if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+    profilePictureError.value = "Choose a JPEG, PNG, or WebP image."
+    input.value = ""
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    profilePictureError.value = "Profile pictures must be 5 MB or smaller."
+    input.value = ""
+    return
+  }
+  selectedProfilePicture.value = file
+  selectedProfilePicturePreview.value = URL.createObjectURL(file)
+}
+
+async function saveProfilePicture() {
+  if (!selectedProfilePicture.value) return
+  profileLoading.value = true
+  profilePictureError.value = ""
+  profileStatus.value = ""
+  try {
+    const form = new FormData()
+    form.set("picture", selectedProfilePicture.value)
+    const result = await api<{ pictureUrl: string }>("/me/profile/picture", {
+      method: "PUT",
+      body: form,
+    })
+    account.profilePictureUrl = result.pictureUrl
+    if (selectedProfilePicturePreview.value) URL.revokeObjectURL(selectedProfilePicturePreview.value)
+    selectedProfilePicture.value = null
+    selectedProfilePicturePreview.value = null
+    profileStatus.value = "Profile picture updated."
+  } catch (error) {
+    profilePictureError.value =
+      error instanceof Error ? error.message : "Profile picture could not be updated."
+  } finally {
+    profileLoading.value = false
+  }
+}
+
+async function removeProfilePicture() {
+  profileLoading.value = true
+  profilePictureError.value = ""
+  profileStatus.value = ""
+  try {
+    await api<void>("/me/profile/picture", { method: "DELETE" })
+    account.profilePictureUrl = null
+    if (selectedProfilePicturePreview.value) URL.revokeObjectURL(selectedProfilePicturePreview.value)
+    selectedProfilePicture.value = null
+    selectedProfilePicturePreview.value = null
+    profileStatus.value = "Profile picture removed."
+  } catch (error) {
+    profilePictureError.value =
+      error instanceof Error ? error.message : "Profile picture could not be removed."
   } finally {
     profileLoading.value = false
   }
@@ -1090,69 +1198,165 @@ async function deactivateAccount() {
 }
 
 function journeyStageCompleted(index: number) {
-  if (account.user && !state.demo) {
-    return realJourney.value[journeyStages[index].name] === "completed"
-  }
-  return index < state.journeyStage
+  return realJourney.value[journeyStages[index].name] === "completed"
 }
 
 async function updateJourneyStage(index: number) {
-  if (account.user && !state.demo) {
-    const stage = journeyStages[index].name
-    try {
-      await api(`/journey/${encodeURIComponent(stage)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "in_progress" }),
-      })
-      realJourney.value[stage] = "in_progress"
-      setJourneyStage(index)
-    } catch (error) {
-      profileStatus.value = error instanceof Error ? error.message : "Journey progress could not be saved."
-    }
-    return
+  const stage = journeyStages[index].name
+  try {
+    await api(`/journey/${encodeURIComponent(stage)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "in_progress" }),
+    })
+    realJourney.value[stage] = "in_progress"
+  } catch (error) {
+    profileStatus.value = error instanceof Error ? error.message : "Journey progress could not be saved."
   }
-  setJourneyStage(index)
 }
 
 async function loadMessages(conversationPublicId: string) {
-  const result = await api<{ messages: Array<{
-    body: string
-    created_at: string
-    sender_role: string
-  }> }>(`/conversations/${encodeURIComponent(conversationPublicId)}/messages`)
-  state.messages.splice(
-    0,
-    state.messages.length,
-    ...result.messages.map((message, index) => ({
-      id: index + 1,
-      from: message.sender_role === "counselor" ? "counselor" as const : "seeker" as const,
-      text: message.body,
-      time: new Date(message.created_at).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    })),
+  const sequence = ++messageLoadSequence
+  const result = await api<{ messages: LiveMessage[] }>(
+    `/conversations/${encodeURIComponent(conversationPublicId)}/messages`,
   )
+  if (
+    sequence !== messageLoadSequence ||
+    currentConversation.value?.publicId !== conversationPublicId
+  ) return
+  realMessages.value = result.messages
+  if (route.name === "counseling" && document.visibilityState === "visible") {
+    const incomingIds = result.messages
+      .filter((message) => !isOwnMessage(message.sender_public_id) && !message.deleted_at)
+      .map((message) => message.id)
+    if (incomingIds.length) {
+      await api(`/conversations/${encodeURIComponent(conversationPublicId)}/receipts`, {
+        method: "POST",
+        body: JSON.stringify({ messageIds: incomingIds, state: "read" }),
+      })
+    }
+  }
+}
+
+async function selectConversation(publicId: string) {
+  const conversation = realConversations.value.find((item) => item.public_id === publicId)
+  if (!conversation) return
+  currentConversation.value = {
+    publicId: conversation.public_id,
+    otherPartyPublicId: conversation.other_party_public_id,
+    otherPartyName: conversation.other_party_display_name,
+    status: conversation.status,
+  }
+  realMessages.value = []
+  chatError.value = ""
+  followLatestMessages = true
+  editingMessageId.value = ""
+  try {
+    await loadMessages(conversation.public_id)
+  } catch (error) {
+    chatError.value = error instanceof Error ? error.message : "Conversation history could not be loaded."
+  }
+}
+
+function beginMessageEdit(message: LiveMessage) {
+  if (message.sender_public_id !== account.user?.publicId || message.deleted_at) return
+  editingMessageId.value = message.id
+  editDraft.value = message.body
+  messageActionError.value = ""
+}
+
+function cancelMessageEdit() {
+  editingMessageId.value = ""
+  editDraft.value = ""
+}
+
+async function saveMessageEdit(message: LiveMessage) {
+  const body = editDraft.value.trim()
+  if (!body || body.length > 4000) {
+    messageActionError.value = "Messages must contain 1–4000 characters."
+    return
+  }
+  try {
+    await api(`/messages/${encodeURIComponent(message.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ body }),
+    })
+    cancelMessageEdit()
+    messageActionError.value = ""
+    if (currentConversation.value) await loadMessages(currentConversation.value.publicId)
+  } catch (error) {
+    messageActionError.value =
+      error instanceof Error ? error.message : "The message could not be edited."
+  }
+}
+
+async function deleteMessage(message: LiveMessage, scope: "for_me" | "for_everyone") {
+  if (
+    scope === "for_everyone" &&
+    !window.confirm("Delete this message for everyone? Its text will be replaced with a deletion notice.")
+  ) return
+  try {
+    await api(`/messages/${encodeURIComponent(message.id)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ scope }),
+    })
+    if (editingMessageId.value === message.id) cancelMessageEdit()
+    messageActionError.value = ""
+    if (currentConversation.value) await loadMessages(currentConversation.value.publicId)
+  } catch (error) {
+    messageActionError.value =
+      error instanceof Error ? error.message : "The message could not be deleted."
+  }
+}
+
+function messageTime(timestamp: string) {
+  return new Date(timestamp).toLocaleString([], {
+    dateStyle: "medium",
+    timeStyle: "short",
+  })
+}
+
+function isOwnMessage(senderPublicId: string) {
+  return senderPublicId === account.user?.publicId
+}
+
+function trackMessageScroll(event: Event) {
+  const element = event.currentTarget
+  if (!(element instanceof HTMLElement)) return
+  followLatestMessages =
+    element.scrollHeight - element.scrollTop - element.clientHeight < 48
 }
 
 onMounted(async () => {
+  localStorage.removeItem("sc-demo")
+  localStorage.removeItem("sc-request")
+  messagePollTimer = window.setInterval(async () => {
+    if (
+      messagePollInFlight ||
+      route.name !== "counseling" ||
+      document.visibilityState !== "visible" ||
+      !currentConversation.value
+    ) return
+    messagePollInFlight = true
+    try {
+      await loadMessages(currentConversation.value.publicId)
+    } catch (error) {
+      chatError.value =
+        error instanceof Error ? error.message : "Conversation updates could not be loaded."
+    } finally {
+      messagePollInFlight = false
+    }
+  }, 5000)
   void loadHomepageSettings().catch((error) => {
     homepageSettingsError.value =
       error instanceof Error ? error.message : "Homepage settings could not be loaded."
   })
+  void loadCounselors()
   try {
     await refreshAccount()
     if (account.user) {
-      state.demo = false
-      localStorage.removeItem("sc-demo")
-      resetDemo()
-      if (account.user.role === "counselor") state.role = "counselor"
-      else if (account.user.role === "superadmin") state.role = "admin"
       await Promise.all([
-        account.user.accountType === "counselor" && account.user.role === "registered"
-          ? Promise.resolve()
-          : loadCounselors(),
         loadAccountData(),
+        loadUserProfile(),
       ])
     }
   } catch {
@@ -1164,12 +1368,8 @@ watch(
   () => route.name,
   async (name) => {
     if (!account.user) return
-    if (name === "counselors" || name === "counselor-profile" || name === "request") {
-      try {
-        await loadCounselors()
-      } catch (error) {
-        requestError.value = error instanceof Error ? error.message : "Counselors could not be loaded."
-      }
+    if (name === "account-settings") {
+      await loadUserProfile()
     }
     if (name === "admin" && account.user.role === "superadmin") {
       try {
@@ -1203,11 +1403,32 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  if (messagePollTimer !== undefined) window.clearInterval(messagePollTimer)
   if (homepageImagePreview.value) URL.revokeObjectURL(homepageImagePreview.value)
 })
 
+watch(
+  realMessages,
+  async () => {
+    await nextTick()
+    const element = messagesElement.value
+    if (element && followLatestMessages) element.scrollTop = element.scrollHeight
+  },
+  { flush: "post" },
+)
+
+watch(
+  () => account.user?.publicId,
+  () => {
+    messageLoadSequence += 1
+    realMessages.value = []
+    currentConversation.value = null
+    chatError.value = ""
+  },
+)
+
 watch(adminTab, (tab) => {
-  if (route.name === "admin" && account.user?.role === "superadmin" && !state.demo) {
+  if (route.name === "admin" && account.user?.role === "superadmin") {
     const loading = tab === "Counselor Applications"
       ? loadAdminApplications()
       : tab === "Settings"
@@ -1230,6 +1451,10 @@ watch(
 )
 
 watch(accountType, () => {
+  if (registrationPicturePreview.value) URL.revokeObjectURL(registrationPicturePreview.value)
+  registrationPicture.value = null
+  registrationPicturePreview.value = null
+  registrationPictureError.value = ""
   accountName.value = ""
   email.value = ""
   password.value = ""
@@ -1256,48 +1481,39 @@ async function submitRequest() {
   requestLoading.value = true
   requestError.value = ""
   try {
-    if (account.user && !state.demo) {
-      const counselorPublicId = selectedCounselor.value.publicId
-      if (!counselorPublicId) {
-        throw new Error("Choose an approved counselor with an active ShepherdConnect account.")
-      }
-      const result = await api<{ request: {
-        public_ref: string
-        status: RequestStatus
-        created_at: string
-      } }>("/requests", {
-        method: "POST",
-        body: JSON.stringify({
-          counselorPublicId,
-          need: state.need,
-          topic: topic.value.trim(),
-          description: description.value.trim(),
-        }),
-      })
-      state.request = {
-        reference: result.request.public_ref,
-        counselor: selectedCounselor.value.name,
-        topic: topic.value.trim(),
-        need: state.need,
-        description: description.value.trim(),
-        status: result.request.status,
-        createdAt: result.request.created_at,
-      }
-    } else if (state.demo) {
-      setDemo(true)
-      createRequest({
-        counselor: selectedCounselor.value.name,
-        topic: topic.value.trim(),
-        need: state.need,
-        description: description.value.trim(),
-      })
-    } else {
+    if (!account.user) {
       accountType.value = state.accessMode === "private" ? "anonymous" : "registered"
       authMode.value = "create"
       authReturnToFlow.value = true
       requestError.value = "Create your private account to securely send and track this request."
       go("/sign-in")
       return
+    }
+    const counselor = selectedCounselor.value
+    if (!counselor?.publicId) {
+      throw new Error("Choose an approved counselor with an active ShepherdConnect account.")
+    }
+    const result = await api<{ request: {
+      public_ref: string
+      status: RequestStatus
+      created_at: string
+    } }>("/requests", {
+      method: "POST",
+      body: JSON.stringify({
+        counselorPublicId: counselor.publicId,
+        need: state.need,
+        topic: topic.value.trim(),
+        description: description.value.trim(),
+      }),
+    })
+    state.request = {
+      reference: result.request.public_ref,
+      counselor: counselor.name,
+      topic: topic.value.trim(),
+      need: state.need,
+      description: description.value.trim(),
+      status: result.request.status,
+      createdAt: result.request.created_at,
     }
     go("/app")
   } catch (error) {
@@ -1333,14 +1549,23 @@ async function submitAuth() {
       postAuthPath.value = authReturnToFlow.value ? "/needs" : homeFor(result.user)
       authStatus.value = result.recoveryCodeWarning || "Private account created. Save your recovery code."
     } else if (authMode.value === "create") {
+      const registrationDetails = {
+        email: email.value,
+        password: password.value,
+        displayName: accountName.value,
+        consent: registrationConsent.value,
+      }
+      let body: BodyInit = JSON.stringify(registrationDetails)
+      const selectedPicture = registrationPicture.value
+      if (selectedPicture) {
+        const form = new FormData()
+        form.set("profile", JSON.stringify(registrationDetails))
+        form.set("profilePicture", selectedPicture)
+        body = form
+      }
       result = await api<AuthResponse>("/auth/register", {
         method: "POST",
-        body: JSON.stringify({
-          email: email.value,
-          password: password.value,
-          displayName: accountName.value,
-          consent: registrationConsent.value,
-        }),
+        body,
       })
       postAuthPath.value = authReturnToFlow.value ? "/needs" : homeFor(result.user)
       authStatus.value = result.recoveryCodeWarning || "Account created. Save your recovery code."
@@ -1353,22 +1578,18 @@ async function submitAuth() {
         }),
       })
       setAccountUser(result.user)
-      setDemo(false)
-      localStorage.removeItem("sc-demo")
-      resetDemo()
-      if (result.user.role === "counselor") state.role = "counselor"
-      if (result.user.role === "superadmin") state.role = "admin"
-      await Promise.all([loadCounselors(), loadAccountData()])
+      await Promise.all([loadCounselors(), loadAccountData(), loadUserProfile()])
       go(homeFor(result.user))
     }
     if (authMode.value !== "sign-in") {
       setAccountUser(result.user)
-      setDemo(false)
-      localStorage.removeItem("sc-demo")
-      resetDemo()
       recoveryCode.value = result.recoveryCode || ""
       recoveryCopied.value = false
       await refreshAccount()
+      await loadUserProfile()
+      if (registrationPicture.value) {
+        account.profilePictureUrl = `/me/profile/picture?v=${Date.now()}`
+      }
     }
   } catch (error) {
     authStatus.value =
@@ -1391,10 +1612,11 @@ async function submitCounselorApplication(payload: FormData, existingAccount = f
       },
     )
     setAccountUser(result.user)
-    setDemo(false)
-    localStorage.removeItem("sc-demo")
-    resetDemo()
     await refreshAccount()
+    await loadUserProfile()
+    if (!existingAccount && payload.has("profilePicture")) {
+      account.profilePictureUrl = `/me/profile/picture?v=${Date.now()}`
+    }
     if (existingAccount) {
       go("/counselor-application")
     } else {
@@ -1477,26 +1699,33 @@ async function upgradeAccount() {
 async function submitMessage() {
   const text = chatText.value.trim()
   if (!text) return
-  if (account.user && !state.demo) {
-    if (!currentConversation.value || currentConversation.value.status !== "open") {
-      chatError.value = "There is no open assigned conversation to message."
-      return
-    }
-    try {
-      await api(`/conversations/${encodeURIComponent(currentConversation.value.publicId)}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ body: text }),
-      })
-      sendMessage(text)
-      chatText.value = ""
-      chatError.value = ""
-    } catch (error) {
-      chatError.value = error instanceof Error ? error.message : "Message could not be sent."
-    }
+  if (!account.user || !currentConversation.value || currentConversation.value.status !== "open") {
+    chatError.value = "There is no open assigned conversation to message."
     return
   }
-  sendMessage(text)
-  chatText.value = ""
+  const conversationPublicId = currentConversation.value.publicId
+  messageSending.value = true
+  try {
+    await api(`/conversations/${encodeURIComponent(conversationPublicId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ body: text }),
+    })
+    chatText.value = ""
+    chatError.value = ""
+  } catch (error) {
+    chatError.value = error instanceof Error ? error.message : "Message could not be sent."
+    return
+  } finally {
+    messageSending.value = false
+  }
+  try {
+    await loadMessages(conversationPublicId)
+  } catch (error) {
+    chatError.value =
+      error instanceof Error
+        ? `Your message was sent, but history could not be refreshed: ${error.message}`
+        : "Your message was sent, but history could not be refreshed."
+  }
 }
 
 async function submitReport() {
@@ -1509,19 +1738,15 @@ async function submitReport() {
   reportLoading.value = true
   reportStatus.value = ""
   try {
-    if (!account.user && !state.demo) {
+    if (!account.user) {
       reportStatus.value = "Sign in to submit a safeguarding concern."
       return
     }
-    if (account.user && !state.demo) {
-      await api("/concerns", {
-        method: "POST",
-        body: JSON.stringify({ summary }),
-      })
-      reportStatus.value = "Your concern was submitted for safeguarding review."
-    } else {
-      reportStatus.value = "Demo preview only: this concern was not sent to safeguarding."
-    }
+    await api("/concerns", {
+      method: "POST",
+      body: JSON.stringify({ summary }),
+    })
+    reportStatus.value = "Your concern was submitted for safeguarding review."
     reportText.value = ""
   } catch (error) {
     reportStatus.value =
@@ -1564,7 +1789,6 @@ function counselorInitials(name: string) {
         </p>
         <div class="hero-actions">
           <BaseButton @click="go('/privacy')">Find support <Icon name="ArrowRight" /></BaseButton>
-          <BaseButton variant="secondary" @click="setDemo(true); go('/app')">Explore the demo</BaseButton>
         </div>
         <p class="microcopy"><Icon name="LockKeyhole" :size="15" /> Your privacy choice comes before we ask for personal details.</p>
       </div>
@@ -1668,29 +1892,30 @@ function counselorInitials(name: string) {
       <p class="results-label">{{ filteredCounselors.length }} counselors available for <strong>{{ state.need }}</strong></p>
       <div class="counselor-grid">
         <article v-for="counselor in filteredCounselors" :key="counselor.id" class="counselor-card">
-          <div class="counselor-card-top"><span :class="`counselor-avatar avatar-${counselor.color}`">{{ counselor.initials }}</span><Badge tone="success"><span class="status-dot" /> {{ counselor.availability }}</Badge></div>
+          <div class="counselor-card-top"><span :class="`counselor-avatar avatar-${counselor.color}`">{{ counselor.initials }}</span><Badge tone="success"><span class="status-dot" /> GCML approved</Badge></div>
           <h2>{{ counselor.name }}</h2><p class="counselor-title">{{ counselor.title }}</p><p>{{ counselor.bio }}</p>
           <div class="tag-row"><Badge v-for="area in counselor.areas.slice(0,3)" :key="area">{{ area }}</Badge></div>
-          <div class="counselor-meta"><span><Icon name="Languages" :size="16" /> {{ counselor.language }}</span><span v-if="counselor.youth"><Icon name="ShieldCheck" :size="16" /> Youth approved</span></div>
+          <div class="counselor-meta"><span><Icon name="Languages" :size="16" /> {{ counselor.language || "Languages not listed" }}</span></div>
           <RouterLink class="card-link" :to="`/counselors/${counselor.id}`">View profile <Icon name="ArrowRight" :size="16" /></RouterLink>
         </article>
       </div>
-      <div v-if="!filteredCounselors.length" class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ account.user && !state.demo && !liveCounselors.length ? 'No approved counselor profiles are available yet' : 'No counselor matches those filters' }}</h3><p>{{ account.user && !state.demo && !liveCounselors.length ? 'Please check back later or contact ShepherdConnect support.' : 'Try another language or a broader search.' }}</p></div>
+      <Notice v-if="counselorLoadError" title="Counselor directory unavailable" tone="warning">{{ counselorLoadError }}</Notice>
+      <div v-else-if="!filteredCounselors.length" class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ liveCounselors.length ? 'No counselor matches those filters' : 'No approved counselor profiles are available yet' }}</h3><p>{{ liveCounselors.length ? 'Try another language or a broader search.' : 'Please check back later or contact ShepherdConnect support.' }}</p></div>
     </div>
   </main>
 
-  <main v-else-if="route.name === 'counselor-profile'" class="flow-page">
+  <main v-else-if="route.name === 'counselor-profile' && selectedCounselor" class="flow-page">
     <div class="flow-top"><Brand /></div>
     <div class="profile-shell">
       <button class="back-link" @click="go('/counselors')"><Icon name="ArrowLeft" :size="17" /> All counselors</button>
       <div class="profile-layout">
         <aside class="profile-summary">
           <span :class="`counselor-avatar avatar-lg avatar-${selectedCounselor.color}`">{{ selectedCounselor.initials }}</span><h1>{{ selectedCounselor.name }}</h1><p>{{ selectedCounselor.title }}</p><Badge tone="success"><Icon name="ShieldCheck" :size="14" /> GCML approved</Badge>
-          <div class="profile-facts"><span><Icon name="Clock3" :size="17" /><b>Availability</b><small>{{ selectedCounselor.availability }}</small></span><span><Icon name="Languages" :size="17" /><b>Languages</b><small>{{ selectedCounselor.language }}</small></span><span v-if="selectedCounselor.youth"><Icon name="ShieldCheck" :size="17" /><b>Youth support</b><small>Approved</small></span></div>
+          <div class="profile-facts"><span><Icon name="Languages" :size="17" /><b>Languages</b><small>{{ selectedCounselor.language || "Not listed" }}</small></span></div>
           <BaseButton @click="go(`/request/${selectedCounselor.id}`)">Request counseling <Icon name="ArrowRight" /></BaseButton><small class="no-guarantee">Availability and response times are not guaranteed.</small>
         </aside>
         <main class="profile-body">
-          <section><span class="section-kicker">About</span><h2>A caring guide for your next step</h2><p>{{ selectedCounselor.bio }} Their approach is prayerful, confidential within stated limits, and centered on helping each person make wise and practical progress.</p></section>
+          <section><span class="section-kicker">About</span><h2>About {{ selectedCounselor.name }}</h2><p>{{ selectedCounselor.bio || "This counselor has not added an introduction yet." }}</p></section>
           <section><h3>Areas of service</h3><div class="service-list"><span v-for="area in [...selectedCounselor.areas, 'Discipleship follow-up']" :key="area"><Icon name="CheckCircle2" :size="18" /> {{ area }}</span></div></section>
           <section class="boundary-card"><Icon name="Shield" :size="22" /><div><h3>Healthy counseling boundaries</h3><p>Counselors do not provide emergency or clinical care. Conversations follow GCML safeguarding and privacy policies, and you can report a concern at any time.</p></div></section>
         </main>
@@ -1698,7 +1923,7 @@ function counselorInitials(name: string) {
     </div>
   </main>
 
-  <main v-else-if="route.name === 'request'" class="flow-page">
+  <main v-else-if="route.name === 'request' && selectedCounselor" class="flow-page">
     <div class="flow-top"><Brand /></div>
     <div class="request-shell">
       <button class="back-link" @click="go(`/counselors/${selectedCounselor.id}`)"><Icon name="ArrowLeft" :size="17" /> Back</button>
@@ -1753,6 +1978,20 @@ function counselorInitials(name: string) {
           </template>
           <template v-else>
             <Field v-if="authMode === 'create' && accountType === 'registered'" label="Display name"><input v-model="accountName" class="control" required maxlength="80" autocomplete="name" /></Field>
+            <Field v-if="authMode === 'create' && accountType === 'registered'" label="Profile picture — optional" hint="JPEG, PNG, or WebP; up to 5 MB. You can change or remove it later.">
+              <div class="profile-picture-field">
+                <ProfileAvatar
+                  v-if="registrationPicturePreview"
+                  class="profile-picture-preview"
+                  :src="registrationPicturePreview"
+                  :name="accountName || 'Your profile'"
+                  size="medium"
+                />
+                <span v-else class="profile-picture-preview profile-picture-placeholder"><Icon name="UserRound" :size="24" /></span>
+                <input class="control file-control" type="file" accept="image/jpeg,image/png,image/webp" @change="selectRegistrationPicture" />
+              </div>
+            </Field>
+            <p v-if="registrationPictureError" class="form-error" role="alert">{{ registrationPictureError }}</p>
             <Field v-if="accountType === 'anonymous' && authMode === 'sign-in'" label="Public account ID"><input v-model="publicId" class="control" required autocomplete="username" placeholder="AN-XXXXXXXX" /></Field>
             <Field v-if="accountType !== 'anonymous'" label="Email"><input v-model="email" class="control" type="email" required autocomplete="email" /></Field>
             <Field label="Password"><div class="password-control"><input v-model="password" class="control" :type="showPassword ? 'text' : 'password'" :minlength="authMode === 'create' ? 12 : 1" maxlength="128" required :autocomplete="authMode === 'sign-in' ? 'current-password' : 'new-password'" /><button type="button" :aria-label="showPassword ? 'Hide password' : 'Show password'" @click="showPassword = !showPassword"><Icon :name="showPassword ? 'EyeOff' : 'Eye'" /></button></div></Field>
@@ -1764,10 +2003,6 @@ function counselorInitials(name: string) {
           <button v-if="authMode === 'sign-in'" type="button" class="auth-text-button" @click="authMode = 'recover'">Use a recovery code</button>
           <button v-else-if="authMode === 'recover'" type="button" class="auth-text-button" @click="authMode = 'sign-in'">Back to sign in</button>
         </form>
-        <template v-if="authMode !== 'recover' && !(authMode === 'create' && accountType === 'counselor')">
-          <div class="auth-divider"><span>or preview with synthetic data</span></div>
-          <BaseButton type="button" variant="secondary" class-name="submit-wide" @click="setDemo(true); go('/app')">Explore demo workspace</BaseButton>
-        </template>
       </section>
       <section v-else class="auth-card recovery-display" aria-live="polite">
         <Badge tone="success"><Icon name="ShieldCheck" :size="14" /> Save this code now</Badge>
@@ -1879,87 +2114,124 @@ function counselorInitials(name: string) {
   </AppShell>
 
   <AppShell v-else-if="route.name === 'seeker-dashboard'" :title="dashboardTitle" eyebrow="Your private space">
-    <Notice v-if="account.user && !state.demo && !['anonymous', 'registered'].includes(account.user.role)" title="This page is not available">Your role does not have access to a seeker dashboard.</Notice>
+    <Notice v-if="account.user && !['anonymous', 'registered'].includes(account.user.role)" title="This page is not available">Your role does not have access to a seeker dashboard.</Notice>
     <div v-else class="dashboard-grid">
-      <section class="welcome-panel"><div><Badge tone="success">You’re not alone</Badge><h2>How are you doing today?</h2><p>Your next step can be small. Continue a conversation, revisit guidance, or simply pause for prayer.</p><p v-if="account.user && !state.demo" class="dashboard-public-id">Your account ID <strong>{{ account.user.publicId }}</strong></p><div><BaseButton @click="go('/counseling')">Open counseling room <Icon name="ArrowRight" :size="17" /></BaseButton><BaseButton variant="ghost" @click="go('/guidance')">View saved guidance</BaseButton></div></div><span class="welcome-art"><Icon name="Leaf" :size="72" /></span></section>
+      <section class="welcome-panel"><div><Badge tone="success">You’re not alone</Badge><h2>How are you doing today?</h2><p>Your next step can be small. Continue a conversation, revisit guidance, or simply pause for prayer.</p><p v-if="account.user" class="dashboard-public-id">Your account ID <strong>{{ account.user.publicId }}</strong></p><div><BaseButton @click="go('/counseling')">Open counseling room <Icon name="ArrowRight" :size="17" /></BaseButton><BaseButton variant="ghost" @click="go('/guidance')">View resources</BaseButton></div></div><span class="welcome-art"><Icon name="Leaf" :size="72" /></span></section>
       <section class="status-card">
         <div class="card-heading"><div><span class="section-kicker">Counseling request</span><h2>Your connection</h2></div><Badge v-if="request" :tone="request.status === 'Pending' ? 'warning' : 'success'">{{ request.status }}</Badge></div>
         <template v-if="request">
-          <div class="connection-row"><span class="counselor-avatar avatar-mint">SK</span><div><strong>{{ request.counselor }}</strong><small>{{ request.topic }}</small></div></div>
+          <div class="connection-row"><span class="private-avatar"><Icon name="EyeOff" :size="20" /></span><div><strong>{{ request.counselor }}</strong><small>{{ request.topic }}</small></div></div>
           <div class="status-timeline"><span class="done"><Icon name="Check" :size="13" /></span><i /><span :class="request.status === 'Accepted' ? 'done' : 'current'"><Icon :name="request.status === 'Accepted' ? 'Check' : 'Clock3'" :size="13" /></span><i /><span><Icon name="MessageCircle" :size="13" /></span></div>
           <div class="timeline-labels"><span>Sent</span><span>{{ request.status === 'Accepted' ? 'Accepted' : 'Awaiting reply' }}</span><span>Conversation</span></div>
           <div class="card-actions"><BaseButton v-if="request.status === 'Pending'" variant="secondary" @click="changeRequestStatus('Cancelled')">Cancel request</BaseButton><BaseButton v-else @click="go('/counseling')">Open room</BaseButton><small>Reference {{ request.reference }}</small></div>
         </template>
         <div v-else class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No active request</h3><p>Choose an approved counselor when you’re ready.</p><BaseButton @click="go('/needs')">Find support</BaseButton></div>
       </section>
-      <section class="journey-preview"><div class="card-heading"><div><span class="section-kicker">Counsel → Guide → Disciple</span><h2>Your journey</h2></div><RouterLink to="/journey">View journey</RouterLink></div><div class="journey-line"><div v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'complete' : index === currentJourneyStage ? 'active' : ''"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="13" /><template v-else>{{ index + 1 }}</template></span><small>{{ stage.name }}</small></div></div><p><strong>Next step:</strong> Agree on a simple follow-up with your counselor.</p></section>
-      <section class="scripture-card"><span class="quote-mark">“</span><p>Do not be anxious about anything, but in every situation, by prayer and petition, with thanksgiving, present your requests to God.</p><div><strong>Philippians 4:6</strong><RouterLink to="/guidance">Reflect on this <Icon name="ChevronRight" :size="16" /></RouterLink></div></section>
-      <section class="quick-links"><h2>Quick actions</h2><button @click="go('/guidance')"><span><Icon name="BookOpen" :size="20" /></span><div><strong>Saved guidance</strong><small>Scripture and resources</small></div><Icon name="ChevronRight" /></button><button @click="go('/needs')"><span><Icon name="HeartHandshake" :size="20" /></span><div><strong>Find another counselor</strong><small>Browse approved profiles</small></div><Icon name="ChevronRight" /></button><button @click="go('/counseling')"><span><Icon name="Flag" :size="20" /></span><div><strong>Report a concern</strong><small>Contact safeguarding support</small></div><Icon name="ChevronRight" /></button></section>
+      <section class="journey-preview"><div class="card-heading"><div><span class="section-kicker">Counsel → Guide → Disciple</span><h2>Your journey</h2></div><RouterLink to="/journey">View journey</RouterLink></div><div class="journey-line"><div v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'complete' : index === currentJourneyStage ? 'active' : ''"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="13" /><template v-else>{{ index + 1 }}</template></span><small>{{ stage.name }}</small></div></div><p v-if="currentJourneyStage === null">Your journey has not started. Explore the stages when you are ready.</p><p v-else><strong>Current stage:</strong> {{ journeyStages[currentJourneyStage].name }}</p></section>
+      <section class="quick-links"><h2>Quick actions</h2><button @click="go('/guidance')"><span><Icon name="BookOpen" :size="20" /></span><div><strong>Browse resources</strong><small>Approved guidance when available</small></div><Icon name="ChevronRight" /></button><button @click="go('/needs')"><span><Icon name="HeartHandshake" :size="20" /></span><div><strong>Find another counselor</strong><small>Browse approved profiles</small></div><Icon name="ChevronRight" /></button><button @click="go('/counseling')"><span><Icon name="Flag" :size="20" /></span><div><strong>Report a concern</strong><small>Contact safeguarding support</small></div><Icon name="ChevronRight" /></button></section>
     </div>
   </AppShell>
 
-  <AppShell v-else-if="route.name === 'counselor-dashboard'" title="Counselor dashboard" eyebrow="Monday, October 12">
-    <template v-if="state.demo || account.user?.role === 'counselor'" #action><BaseButton variant="secondary"><Icon name="CalendarDays" :size="17" /> Availability</BaseButton></template>
-    <Notice v-if="account.user && !state.demo && account.user.role !== 'counselor'" title="This page is not available">Only an assigned counselor account can access the counselor workspace.</Notice>
+  <AppShell v-else-if="route.name === 'counselor-dashboard'" title="Counselor dashboard" eyebrow="Your workspace">
+    <Notice v-if="account.user && account.user.role !== 'counselor'" title="This page is not available">Only an assigned counselor account can access the counselor workspace.</Notice>
     <template v-else>
     <div class="stats-row">
-      <div><span><Icon name="HeartHandshake" :size="20" /></span><small>New requests</small><strong>{{ account.user && !state.demo ? counselorCases.filter((item) => item.status === 'Pending').length : request?.status === 'Pending' ? 1 : 0 }}</strong></div><div><span><Icon name="MessageCircle" :size="20" /></span><small>Active conversations</small><strong>{{ account.user && !state.demo ? realConversations.filter((item) => item.status === 'open').length : 4 }}</strong></div><div><span><Icon name="Users" :size="20" /></span><small>Disciples</small><strong>{{ account.user && !state.demo ? '—' : 7 }}</strong></div><div><span><Icon name="Clock3" :size="20" /></span><small>Follow-ups due</small><strong>{{ account.user && !state.demo ? '—' : 2 }}</strong></div>
+      <div><span><Icon name="HeartHandshake" :size="20" /></span><small>New requests</small><strong>{{ counselorCases.filter((item) => item.status === 'Pending').length }}</strong></div><div><span><Icon name="MessageCircle" :size="20" /></span><small>Active conversations</small><strong>{{ realConversations.filter((item) => item.status === 'open').length }}</strong></div>
     </div>
     <div class="dashboard-two-col">
-      <section class="panel"><div class="card-heading"><div><span class="section-kicker">Needs your attention</span><h2>New requests</h2></div><Badge tone="warning">{{ request?.status === 'Pending' ? '1 new' : 'Up to date' }}</Badge></div>
-        <template v-if="account.user && !state.demo">
+      <section class="panel"><div class="card-heading"><div><span class="section-kicker">Needs your attention</span><h2>New requests</h2></div><Badge tone="warning">{{ counselorCases.some((item) => item.status === 'Pending') ? 'New requests' : 'Up to date' }}</Badge></div>
+        <template>
           <article v-for="caseItem in counselorCases.filter((item) => item.status === 'Pending')" :key="String(caseItem.public_ref)" class="request-row"><span class="private-avatar"><Icon name="EyeOff" :size="20" /></span><div class="request-main"><div><strong>{{ caseItem.seeker_public_id }}</strong><Badge>Assigned case</Badge></div><h3>{{ caseItem.topic }}</h3><p>{{ caseItem.description || 'The seeker requested a private conversation.' }}</p><span><Icon name="Clock3" :size="14" /> {{ caseItem.need }}</span></div><div class="request-actions"><BaseButton @click="changeRequestStatus('Accepted', String(caseItem.public_ref))">Accept</BaseButton><BaseButton variant="secondary" @click="changeRequestStatus('Declined', String(caseItem.public_ref))">Decline</BaseButton></div></article>
           <div v-if="!counselorCases.some((item) => item.status === 'Pending')" class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No new requests</h3><p>New assigned requests will appear here.</p></div>
         </template>
-        <template v-else>
-          <article v-if="request?.status === 'Pending'" class="request-row"><span class="private-avatar"><Icon name="EyeOff" :size="20" /></span><div class="request-main"><div><strong>Private Seeker 184</strong><Badge>Private mode</Badge></div><h3>{{ request.topic }}</h3><p>{{ request.description || 'I would appreciate a private conversation and some Biblical guidance.' }}</p><span><Icon name="Clock3" :size="14" /> Received today · {{ request.need }}</span></div><div class="request-actions"><BaseButton @click="changeRequestStatus('Accepted')">Accept</BaseButton><BaseButton variant="secondary" @click="changeRequestStatus('Declined')">Decline</BaseButton></div></article>
-          <div v-else class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No new requests</h3><p>New assigned requests will appear here.</p></div>
-        </template>
       </section>
       <section class="panel"><div class="card-heading"><div><span class="section-kicker">Continue care</span><h2>Active conversations</h2></div><RouterLink to="/counseling">View all</RouterLink></div>
-        <template v-if="account.user && !state.demo"><button v-for="conversation in realConversations" :key="String(conversation.public_id)" class="conversation-row" @click="currentConversation = { publicId: String(conversation.public_id), otherPartyPublicId: String(conversation.other_party_public_id), otherPartyName: conversation.other_party_display_name, status: String(conversation.status) }; go('/counseling')"><span class="private-avatar"><Icon name="EyeOff" :size="17" /></span><div><strong>{{ conversation.other_party_display_name || conversation.other_party_public_id }}</strong><small>Assigned private conversation</small></div><span>{{ conversation.status }}</span></button><p v-if="!realConversations.length" class="empty-state">No assigned conversations.</p></template>
-        <button v-else v-for="(person, index) in [{ name: 'Private Seeker 052', message: 'Thank you. I’ll try that this week.', age: '12m' },{ name: 'A. Johnson', message: 'Can we discuss the passage again?', age: '2h' },{ name: 'Private Seeker 191', message: 'I have an update from our last chat.', age: '1d' }]" :key="person.name" class="conversation-row" @click="go('/counseling')"><span :class="index === 1 ? 'person-avatar' : 'private-avatar'">{{ index === 1 ? 'AJ' : '' }}<Icon v-if="index !== 1" name="EyeOff" :size="17" /></span><div><strong>{{ person.name }}</strong><small>{{ person.message }}</small></div><span>{{ person.age }}</span></button>
+        <button v-for="conversation in realConversations" :key="conversation.public_id" class="conversation-row" @click="selectConversation(conversation.public_id); go('/counseling')"><span class="private-avatar"><Icon name="EyeOff" :size="17" /></span><div><strong>{{ conversation.other_party_display_name || conversation.other_party_public_id }}</strong><small>Assigned private conversation</small></div><span>{{ conversation.status }}</span></button><p v-if="!realConversations.length" class="empty-state">No assigned conversations.</p>
       </section>
     </div>
-    <section v-if="state.demo" class="panel followup-panel"><div class="card-heading"><div><span class="section-kicker">This week</span><h2>Follow-ups</h2></div></div><div class="followup-list"><div><span>Today</span><strong>Private Seeker 052</strong><small>Prayer check-in · 3:00 PM</small><BaseButton variant="secondary" @click="go('/counseling')">Open conversation</BaseButton></div><div><span>Wed</span><strong>A. Johnson</strong><small>Bible study follow-up · 5:30 PM</small><BaseButton variant="secondary" @click="go('/counseling')">View details</BaseButton></div></div></section>
     </template>
   </AppShell>
 
-  <AppShell v-else-if="route.name === 'counseling'" :title="`Private counseling${currentConversation ? ` · ${currentConversation.otherPartyName || currentConversation.otherPartyPublicId}` : ''}`" eyebrow="Active conversation">
+  <AppShell v-else-if="route.name === 'counseling'" :title="`Private counseling${currentConversation ? ` · ${currentConversation.otherPartyName || currentConversation.otherPartyPublicId}` : ''}`" eyebrow="Your conversations">
     <template #action><BaseButton variant="danger" @click="leaveConversation"><Icon name="ArrowRight" :size="17" /> Quick Exit</BaseButton></template>
     <div class="room-layout">
       <section class="chat-panel">
-        <header class="chat-person"><span class="counselor-avatar avatar-mint"><Icon v-if="account.user && !state.demo" name="EyeOff" :size="18" /><template v-else>SK</template></span><div><strong>{{ account.user && !state.demo ? currentConversation?.otherPartyName || currentConversation?.otherPartyPublicId || "No assigned conversation" : "Sarah K." }}</strong><small><span class="status-dot" /> {{ account.user && !state.demo ? currentConversation?.status === 'open' ? 'Assigned private conversation' : 'No open conversation' : 'GCML-approved counselor' }}</small></div><button @click="reportOpen = true"><Icon name="Flag" :size="17" /> Report a concern</button></header>
+        <header class="chat-person"><span class="private-avatar"><Icon name="EyeOff" :size="18" /></span><div><strong>{{ currentConversation?.otherPartyName || currentConversation?.otherPartyPublicId || "No assigned conversation" }}</strong><small><span class="status-dot" /> {{ currentConversation?.status === 'open' ? 'Assigned private conversation' : currentConversation ? 'Conversation history · resolved' : 'No open conversation' }}</small></div><button @click="reportOpen = true"><Icon name="Flag" :size="17" /> Report a concern</button></header>
         <Notice title="Private conversation">Only you and your assigned counselor can access this room. Avoid unnecessary identifying information.</Notice>
-        <div v-if="account.user && !state.demo && !currentConversation" class="messages"><div class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No assigned conversation</h3><p>When an assigned counselor accepts a request, the conversation will appear here.</p></div></div>
-        <div v-else-if="state.demo || (currentConversation && currentConversation.status === 'open')" class="messages"><div v-for="message in state.messages" :key="message.id" :class="`message message-${message.from}`"><small>{{ message.from === 'seeker' ? 'You' : account.user && !state.demo ? currentConversation?.otherPartyName || currentConversation?.otherPartyPublicId : 'Sarah K.' }}</small><p>{{ message.text }}</p><span>{{ message.time }} · Sent</span></div></div>
+        <label v-if="account.user && realConversations.length > 1" class="conversation-picker">
+          <span>Conversation history</span>
+          <select
+            class="control"
+            :value="currentConversation?.publicId"
+            aria-label="Choose a conversation"
+            @change="selectConversation(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="conversation in realConversations" :key="conversation.public_id" :value="conversation.public_id">
+              {{ conversation.other_party_display_name }} · {{ conversation.status }}
+            </option>
+          </select>
+        </label>
+        <div v-if="!currentConversation" ref="messagesElement" class="messages"><div class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>No assigned conversation</h3><p>When an assigned counselor accepts a request, the conversation will appear here.</p></div></div>
+        <div v-else ref="messagesElement" class="messages" aria-label="Conversation messages" @scroll="trackMessageScroll">
+          <div
+            v-for="message in conversationMessages"
+            :key="message.id"
+            :class="['message', message.own ? 'message-outgoing' : 'message-incoming']"
+          >
+            <small>{{ message.sender }}</small>
+            <form v-if="editingMessageId === message.id" class="message-edit-form" @submit.prevent="saveMessageEdit(message.record)">
+              <textarea v-model="editDraft" class="control textarea" rows="3" maxlength="4000" aria-label="Edit message" />
+              <div><BaseButton type="submit">Save</BaseButton><BaseButton type="button" variant="secondary" @click="cancelMessageEdit">Cancel</BaseButton></div>
+            </form>
+            <p v-else>{{ message.text }}</p>
+            <span>
+              {{ message.time }}
+              <template v-if="message.edited"> · Edited</template>
+              <template v-if="message.own">
+                · <span
+                  class="message-receipt"
+                  :class="{ 'message-receipt-read': message.status === 'read' }"
+                  :aria-label="message.status === 'read' ? 'Read' : message.status === 'delivered' ? 'Delivered' : 'Sent'"
+                  :title="message.status === 'read' ? 'Read' : message.status === 'delivered' ? 'Delivered to recipient account' : 'Sent'"
+                >{{ message.status === 'sent' ? "✓" : "✓✓" }}</span>
+              </template>
+            </span>
+            <details class="message-actions">
+              <summary aria-label="Message actions" title="Message actions">⋯</summary>
+              <div>
+                <button v-if="message.own && !message.deleted" type="button" @click="beginMessageEdit(message.record)">Edit</button>
+                <button type="button" @click="deleteMessage(message.record, 'for_me')">Delete for me</button>
+                <button v-if="message.own && !message.deleted" type="button" @click="deleteMessage(message.record, 'for_everyone')">Delete for everyone</button>
+              </div>
+            </details>
+          </div>
+        </div>
         <p v-if="chatError" class="form-error" role="alert">{{ chatError }}</p>
+        <p v-if="messageActionError" class="form-error" role="alert">{{ messageActionError }}</p>
         <div class="share-tools"><button @click="go('/guidance')"><Icon name="BookOpen" :size="17" /> Scripture</button><button @click="chatText = 'Could we pause and pray about this together?'"><Icon name="Heart" :size="17" /> Prayer</button><button @click="go('/guidance')"><Icon name="Plus" :size="17" /> Resource</button></div>
-        <form v-if="state.demo || (currentConversation && currentConversation.status === 'open')" class="composer" @submit.prevent="submitMessage"><textarea v-model="chatText" class="control textarea" maxlength="4000" rows="2" placeholder="Type a private message…" aria-label="Message" /><BaseButton type="submit" aria-label="Send message"><Icon name="Send" /></BaseButton></form>
+        <form v-if="currentConversation?.status === 'open'" class="composer" @submit.prevent="submitMessage"><textarea v-model="chatText" class="control textarea" maxlength="4000" rows="2" placeholder="Type a private message…" aria-label="Message" /><BaseButton type="submit" :disabled="messageSending" :aria-label="messageSending ? 'Sending message' : 'Send message'"><span v-if="messageSending" aria-live="polite">Sending…</span><Icon v-else name="Send" /></BaseButton></form>
       </section>
-      <aside class="room-aside"><div><span class="section-kicker">Conversation focus</span><h3>{{ state.need }}</h3><p>Started October 9, 2026</p></div><div><span class="section-kicker">Shared today</span><article><Icon name="BookOpen" :size="19" /><span><strong>Philippians 4:6–7</strong><small>Scripture · Saved</small></span></article></div><div class="safety-card"><Icon name="ShieldCheck" :size="22" /><h3>Need help?</h3><p>Report a concern without sharing more identity information.</p><button @click="reportOpen = true">Contact safeguarding</button></div></aside>
+      <aside class="room-aside"><div><span class="section-kicker">Conversation</span><h3>Private conversation</h3><p>Messages are visible to the assigned participants.</p></div><div class="safety-card"><Icon name="ShieldCheck" :size="22" /><h3>Need help?</h3><p>Report a concern without sharing more identity information.</p><button @click="reportOpen = true">Contact safeguarding</button></div></aside>
     </div>
     <div v-if="reportOpen" class="modal-backdrop" role="presentation" @mousedown.self="reportOpen = false"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="report-title"><span class="modal-icon"><Icon name="Flag" :size="24" /></span><h2 id="report-title">Report a concern</h2><p>Share only what the safeguarding team needs to review the concern. This does not provide emergency help.</p><Notice v-if="reportStatus" title="Update" tone="success">{{ reportStatus }}</Notice><Field v-else label="What happened?"><textarea v-model="reportText" class="control textarea" rows="5" maxlength="1000" /></Field><div class="modal-actions"><BaseButton variant="secondary" @click="reportOpen = false">Close</BaseButton><BaseButton v-if="!reportStatus" :disabled="reportLoading" @click="submitReport">{{ reportLoading ? 'Submitting…' : 'Submit securely' }}</BaseButton></div></div></div>
   </AppShell>
 
   <AppShell v-else-if="route.name === 'guidance'" title="Biblical guidance" eyebrow="Approved resources">
-    <div class="guidance-intro"><div><Badge tone="blue"><Icon name="BookHeart" :size="14" /> Shared by your counselor</Badge><h2>Truth to carry into your week.</h2><p>Save what helps, return when you need it, and discuss questions with your counselor.</p></div><div class="saved-count"><strong>{{ state.savedResources.length }}</strong><small>saved resources</small></div></div>
-    <div class="resource-grid"><article v-for="(resource, index) in resources" :key="resource.id" :class="index === 0 ? 'resource-card resource-featured' : 'resource-card'"><div class="resource-top"><span><Icon :name="resource.icon" :size="20" /></span><small>{{ resource.type }}</small><Badge tone="success">GCML approved</Badge></div><h2>{{ resource.title }}</h2><blockquote>{{ resource.body }}</blockquote><div class="reflection"><small>Reflect</small><p>{{ resource.prompt }}</p></div><BaseButton :variant="state.savedResources.includes(resource.id) ? 'secondary' : 'primary'" @click="toggleResource(resource.id)"><template v-if="state.savedResources.includes(resource.id)"><Icon name="Check" :size="16" /> Saved to my journey</template><template v-else><Icon name="Plus" :size="16" /> Add to my journey</template></BaseButton></article></div>
-    <Notice title="A note about Scripture text">References and short excerpts shown in this demo must be checked for the approved translation and licensing before production publishing.</Notice>
+    <section class="panel empty-state"><span><Icon name="BookOpen" :size="26" /></span><h2>No approved resources available</h2><p>Approved Scripture references and guidance will appear here when they are published.</p></section>
   </AppShell>
 
   <AppShell v-else-if="route.name === 'journey'" title="My discipleship journey" eyebrow="Growing in Christ">
-    <section class="journey-hero"><div><Badge tone="success"><Icon name="Sprout" :size="14" /> Stage {{ currentJourneyStage + 1 }} of 6</Badge><h2>Your journey is about faithful steps, not a score.</h2><p>Discipleship is voluntary. You can pause, decline, or talk with your counselor about a different next step.</p></div><div class="progress-ring"><svg viewBox="0 0 42 42"><circle cx="21" cy="21" r="16" /><circle cx="21" cy="21" r="16" pathLength="100" :stroke-dasharray="`${((currentJourneyStage + 1) / 6) * 100} 100`" /></svg><span><strong>{{ Math.round(((currentJourneyStage + 1) / 6) * 100) }}%</strong><small>path viewed</small></span></div></section>
-    <section class="journey-panel"><div class="journey-stages"><button v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'completed' : index === currentJourneyStage ? 'current' : ''" @click="updateJourneyStage(index)"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="16" /><template v-else>{{ index + 1 }}</template></span><div><small>Stage {{ index + 1 }}</small><strong>{{ stage.name }}</strong><p>{{ stage.detail }}</p></div><Badge v-if="index === currentJourneyStage" tone="blue">Current</Badge></button></div><aside class="next-step-card"><span class="section-kicker">Your next step</span><span class="next-icon"><Icon name="CalendarDays" :size="24" /></span><h2>Plan a follow-up</h2><p>Agree with your counselor on a suitable next conversation or action.</p><BaseButton @click="updateJourneyStage(Math.min(5, currentJourneyStage + 1))">Mark next step viewed</BaseButton><small>Milestone definitions await GCML approval; this preview is not an authoritative progress score.</small></aside></section>
+    <section class="journey-hero"><div><Badge tone="success"><Icon name="Sprout" :size="14" />{{ currentJourneyStage === null ? " Not started" : ` Stage ${currentJourneyStage + 1} of 6` }}</Badge><h2>Your journey is about faithful steps, not a score.</h2><p>Discipleship is voluntary. You can pause, decline, or talk with your counselor about a different next step.</p></div></section>
+    <section class="journey-panel"><div class="journey-stages"><button v-for="(stage, index) in journeyStages" :key="stage.name" :class="journeyStageCompleted(index) ? 'completed' : index === currentJourneyStage ? 'current' : ''" @click="updateJourneyStage(index)"><span><Icon v-if="journeyStageCompleted(index)" name="Check" :size="16" /><template v-else>{{ index + 1 }}</template></span><div><small>Stage {{ index + 1 }}</small><strong>{{ stage.name }}</strong><p>{{ stage.detail }}</p></div><Badge v-if="index === currentJourneyStage" tone="blue">In progress</Badge></button></div><aside class="next-step-card"><span class="section-kicker">Your next step</span><span class="next-icon"><Icon name="CalendarDays" :size="24" /></span><h2>{{ currentJourneyStage === null ? "Choose a stage" : "Continue at your pace" }}</h2><p>Select a stage to record that you are exploring it. Your journey is voluntary and does not affect account access.</p><BaseButton @click="updateJourneyStage(currentJourneyStage === null ? 0 : Math.min(5, currentJourneyStage + 1))">{{ currentJourneyStage === null ? "Start your journey" : "Mark next stage in progress" }}</BaseButton></aside></section>
   </AppShell>
 
   <AppShell v-else-if="route.name === 'admin'" title="Administration" eyebrow="GCML operations">
-    <template v-if="state.demo || account.user?.role === 'superadmin'" #action><BaseButton @click="changeAdminTab('Users')"><Icon name="Users" :size="17" /> Manage users</BaseButton></template>
-    <Notice v-if="account.user && !state.demo && account.user.role !== 'superadmin'" title="This page is not available">Your account does not have SuperAdmin permissions.</Notice>
+    <template v-if="account.user?.role === 'superadmin'" #action><BaseButton @click="changeAdminTab('Users')"><Icon name="Users" :size="17" /> Manage users</BaseButton></template>
+    <Notice v-if="account.user && account.user.role !== 'superadmin'" title="This page is not available">Your account does not have SuperAdmin permissions.</Notice>
     <template v-else>
-    <Notice :title="state.demo ? 'Synthetic administration preview' : 'Administrative privacy boundary'">{{ state.demo ? 'This demo contains no real counselor vetting or seeker records. Production admin access is permission-scoped by GCML.' : 'Account management and small-cohort reports are available here. SuperAdmin access does not grant access to private counseling messages.' }}</Notice>
+    <Notice title="Administrative privacy boundary">Account management and small-cohort reports are available here. SuperAdmin access does not grant access to private counseling messages.</Notice>
     <div class="admin-tabs"><button v-for="tab in adminTabs" :key="tab" :class="{ active: adminTab === tab }" @click="changeAdminTab(tab)">{{ tab }}</button></div>
-    <section v-if="adminTab === 'Counselor Applications' && !state.demo" class="admin-application-workspace">
+    <section v-if="adminTab === 'Counselor Applications'" class="admin-application-workspace">
       <section v-if="adminNotifications.length" class="panel application-status-panel">
         <span class="section-kicker">Application notifications</span>
         <article v-for="notification in adminNotifications" :key="notification.id" class="application-notification">
@@ -2108,28 +2380,25 @@ function counselorInitials(name: string) {
       </section>
     </section>
     <section v-else-if="adminTab === 'Counselors'" class="panel admin-panel">
-      <div class="table-tools"><label class="search-control"><Icon name="Search" :size="18" /><input v-model="adminSearch" placeholder="Search counselor profiles" /></label><select v-if="state.demo" v-model="adminStatus" class="control" aria-label="Approval status"><option>All statuses</option><option>Approved</option><option>Pending review</option><option>Suspended</option></select></div>
-      <div v-if="state.demo" class="data-table"><div class="table-row table-head"><span>Counselor</span><span>Service areas</span><span>Approval</span><span>Availability</span><span /></div>
-        <div v-for="row in filteredAdminRows" :key="row.name" class="table-row"><span data-label="Counselor"><i :class="`counselor-avatar avatar-sm avatar-${row.color}`">{{ counselorInitials(row.name) }}</i><b>{{ row.name }}</b></span><span data-label="Service areas">{{ row.areas }}</span><span data-label="Approval"><Badge :tone="row.approval === 'Approved' ? 'success' : 'warning'">{{ row.approval }}</Badge></span><span data-label="Availability">{{ row.availability }}</span><button :aria-label="`Actions for ${row.name}`"><Icon name="MoreHorizontal" :size="19" /></button></div>
-      </div>
-      <div v-else class="data-table"><div class="table-row table-head"><span>Counselor</span><span>Service areas</span><span>Approval</span><span>Account</span><span /></div>
+      <div class="table-tools"><label class="search-control"><Icon name="Search" :size="18" /><input v-model="adminSearch" placeholder="Search counselor profiles" /></label></div>
+      <div class="data-table"><div class="table-row table-head"><span>Counselor</span><span>Service areas</span><span>Approval</span><span>Account</span><span /></div>
         <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Counselor"><b>{{ user.displayName || user.publicId }}</b><small>{{ user.publicId }}</small></span><span data-label="Service areas">{{ user.areas?.join(', ') || 'Not set' }}</span><span data-label="Approval"><Badge :tone="user.approved ? 'success' : 'warning'">{{ user.approved ? 'Approved' : 'Legacy record' }}</Badge></span><span data-label="Account">{{ user.status }}</span><span /></div>
       </div>
     </section>
-    <section v-else-if="adminTab === 'Users' && !state.demo" class="panel admin-panel">
+    <section v-else-if="adminTab === 'Users'" class="panel admin-panel">
       <label class="search-control"><Icon name="Search" :size="18" /><input v-model="adminSearch" placeholder="Search by public ID or display name" /></label>
       <Notice title="Account access">Changing a status revokes existing sessions. Staff roles never grant message access by themselves.</Notice>
       <div class="data-table"><div class="table-row table-head"><span>Account</span><span>Type</span><span>Role</span><span>Status</span><span>Created</span></div>
         <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Account"><b>{{ user.displayName || 'Private account' }}</b><small>{{ user.publicId }}</small></span><span data-label="Type">{{ user.accountType }}</span><span data-label="Role"><select v-if="user.accountType === 'registered' && user.role !== 'counselor'" class="control compact-select" :value="user.role" @change="selectAdminRole(user, $event)"><option value="registered">Registered user</option><option value="superadmin">SuperAdmin</option></select><span v-else-if="user.accountType === 'counselor'">{{ user.role === 'counselor' ? 'Approved counselor' : 'Counselor applicant' }}</span><span v-else-if="user.role === 'counselor'">Legacy counselor</span><span v-else>Anonymous user</span></span><span data-label="Status"><select class="control compact-select" :value="user.status" @change="selectAdminStatus(user, $event)"><option value="active">Active</option><option value="suspended">Suspended</option><option value="deactivated">Deactivated</option></select></span><span data-label="Created">{{ new Date(user.createdAt).toLocaleDateString() }}</span></div>
       </div>
     </section>
-    <section v-else-if="adminTab === 'Safeguarding' && !state.demo" class="panel admin-panel">
+    <section v-else-if="adminTab === 'Safeguarding'" class="panel admin-panel">
       <Notice title="Explicit safeguarding access">Only accounts granted the separate safeguarding-review permission may read report content. This screen does not display or unlock counseling messages.</Notice>
       <div class="data-table"><div class="table-row table-head"><span>Account</span><span>Role</span><span>Status</span><span>Review access</span><span /></div>
         <div v-for="user in adminSearchResults" :key="user.publicId" class="table-row"><span data-label="Account">{{ user.displayName || user.publicId }}<small>{{ user.publicId }}</small></span><span data-label="Role">{{ user.role }}</span><span data-label="Status">{{ user.status }}</span><span data-label="Review access">{{ user.safeguardingReview ? 'Granted' : 'Not granted' }}</span><button class="inline-action" @click="toggleSafeguardingPermission(user)">{{ user.safeguardingReview ? 'Revoke' : 'Grant' }}</button></div>
       </div>
     </section>
-    <section v-else-if="adminTab === 'Settings' && !state.demo" class="admin-settings-grid">
+    <section v-else-if="adminTab === 'Settings'" class="admin-settings-grid">
       <section class="panel settings-card">
         <span class="section-kicker">Public homepage</span>
         <h2>Homepage image</h2>
@@ -2194,41 +2463,65 @@ function counselorInitials(name: string) {
       </section>
       <Notice title="Administrative settings">Homepage artwork changes are public and are recorded in the audit log. Access policies, safeguarding rules, and ministry content are intentionally not editable here; those require approved governance settings.</Notice>
     </section>
-    <section v-else class="panel"><div class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ adminTab }} workspace</h3><p>{{ adminTabDescriptions[adminTab] }}</p><BaseButton variant="secondary">Review access policy</BaseButton></div></section>
+    <section v-else class="panel"><div class="empty-state"><span><Icon name="MessageCircle" :size="26" /></span><h3>{{ adminTab }} workspace</h3><p>{{ adminTabDescriptions[adminTab] }}</p></div></section>
     </template>
   </AppShell>
 
   <AppShell v-else-if="route.name === 'reports'" title="Impact reports" eyebrow="Aggregate insights">
-    <template v-if="state.demo || account.user?.role === 'superadmin'" #action><BaseButton variant="secondary"><Icon name="Download" :size="17" /> Export summary</BaseButton></template>
-    <Notice v-if="account.user && !state.demo && account.user.role !== 'superadmin'" title="This page is not available">Aggregate reports are limited to authorized SuperAdmins.</Notice>
+    <Notice v-if="account.user && account.user.role !== 'superadmin'" title="This page is not available">Aggregate reports are limited to authorized SuperAdmins.</Notice>
     <template v-else>
-    <Notice :title="state.demo ? 'Privacy-protective reporting preview' : 'Privacy-protective aggregate reporting'">{{ state.demo ? 'Metrics use synthetic data and exclude message content, private identities, and small-group breakdowns.' : 'Reports contain aggregate operational counts only. Counts below five are suppressed to reduce re-identification risk.' }}</Notice>
-    <div v-if="state.demo" class="report-filters"><select class="control" aria-label="Reporting period"><option>Last 30 days</option><option>Last quarter</option></select><select class="control" aria-label="Need area"><option>All need areas</option><option>Prayer &amp; spiritual growth</option></select></div>
-    <div class="stats-row reports"><div><span><Icon name="Users" :size="20" /></span><small>{{ state.demo ? 'People connected' : 'Total accounts' }}</small><strong>{{ state.demo ? '184' : reportValue('accounts') }}</strong><em>{{ state.demo ? '+12% vs prior period' : 'Small totals are suppressed' }}</em></div><div><span><Icon name="HeartHandshake" :size="20" /></span><small>Requests accepted</small><strong>{{ state.demo ? '142' : reportValue('accepted_requests') }}</strong><em>{{ state.demo ? '77% of requests' : 'Aggregate only' }}</em></div><div><span><Icon name="MessageCircle" :size="20" /></span><small>Active engagements</small><strong>{{ state.demo ? '68' : reportValue('open_conversations') }}</strong><em>Aggregate only</em></div><div><span><Icon name="Sprout" :size="20" /></span><small>{{ state.demo ? 'Discipleship invitations' : 'Completed path stages' }}</small><strong>{{ state.demo ? '39' : reportValue('completed_stages') }}</strong><em>Voluntary participation</em></div></div>
-    <div v-if="state.demo" class="reports-grid"><section class="panel chart-panel"><div class="card-heading"><div><span class="section-kicker">Connection trend</span><h2>Requests and accepted connections</h2></div><Icon name="BarChart3" :size="22" /></div><div class="bar-chart"><div v-for="bar in reportBars" :key="bar.label"><div class="bars"><i :style="{ height: `${bar.total}%` }" /><i :style="{ height: `${bar.accepted}%` }" /></div><span>{{ bar.label }}</span></div></div><div class="chart-legend"><span><i /> Requests</span><span><i /> Accepted</span></div></section>
-      <section class="panel need-report"><div class="card-heading"><div><span class="section-kicker">Top support areas</span><h2>Needs selected</h2></div></div><div v-for="item in reportNeeds" :key="item.label"><span><b>{{ item.label }}</b><small>{{ item.value }}%</small></span><i><em :style="{ width: `${item.value}%` }" /></i></div></section></div>
+    <Notice title="Privacy-protective aggregate reporting">Reports contain aggregate operational counts only. Counts below five are suppressed to reduce re-identification risk.</Notice>
+    <div class="stats-row reports"><div><span><Icon name="Users" :size="20" /></span><small>Total accounts</small><strong>{{ reportValue('accounts') }}</strong><em>Small totals are suppressed</em></div><div><span><Icon name="HeartHandshake" :size="20" /></span><small>Requests accepted</small><strong>{{ reportValue('accepted_requests') }}</strong><em>Aggregate only</em></div><div><span><Icon name="MessageCircle" :size="20" /></span><small>Active engagements</small><strong>{{ reportValue('open_conversations') }}</strong><em>Aggregate only</em></div><div><span><Icon name="Sprout" :size="20" /></span><small>Completed path stages</small><strong>{{ reportValue('completed_stages') }}</strong><em>Voluntary participation</em></div></div>
     <p class="report-footnote">A “connection” means a counseling request accepted by its assigned counselor. Targets, substantive-engagement definitions, and journey completion rules require GCML approval before production reporting.</p>
     </template>
   </AppShell>
 
   <AppShell v-else-if="route.name === 'account-settings'" title="Account settings" eyebrow="Your ShepherdConnect account">
-    <Notice v-if="!account.user && !state.demo" title="Sign in to manage your account">
+    <Notice v-if="!account.user" title="Sign in to manage your account">
       Your private account settings are available after sign-in.
       <RouterLink to="/sign-in">Sign in securely</RouterLink>
     </Notice>
-    <template v-else-if="account.user && !state.demo">
+    <template v-else-if="account.user">
       <section class="panel settings-card">
         <div class="card-heading"><div><span class="section-kicker">Account identity</span><h2>{{ account.user.displayName || "Private account" }}</h2></div><Badge tone="success">{{ account.user.status }}</Badge></div>
+        <section class="profile-picture-editor" aria-label="Profile picture settings">
+          <ProfileAvatar
+            :src="selectedProfilePicturePreview || (account.profilePictureUrl ? apiUrl(account.profilePictureUrl) : null)"
+            :name="account.user.displayName || account.user.publicId"
+            size="large"
+          />
+          <div>
+            <Field label="Profile picture — optional" hint="Your picture is private to your account. Anonymous users’ pictures are never shown to counselors. JPEG, PNG, or WebP; up to 5 MB.">
+              <input class="control file-control" type="file" accept="image/jpeg,image/png,image/webp" @change="selectProfilePicture" />
+            </Field>
+            <p v-if="profilePictureError" class="form-error" role="alert">{{ profilePictureError }}</p>
+            <div class="profile-picture-actions">
+              <BaseButton v-if="selectedProfilePicture" variant="secondary" :disabled="profileLoading" @click="saveProfilePicture">
+                {{ profileLoading ? "Saving…" : "Save picture" }}
+              </BaseButton>
+              <BaseButton v-if="account.profilePictureUrl" variant="ghost" :disabled="profileLoading" @click="removeProfilePicture">
+                Remove picture
+              </BaseButton>
+            </div>
+          </div>
+        </section>
         <dl class="account-details"><div><dt>Public account ID</dt><dd>{{ account.user.publicId }}</dd></div><div><dt>Account type</dt><dd>{{ account.user.accountType === 'anonymous' ? 'Private / anonymous' : account.user.accountType === 'counselor' ? 'Counselor account' : 'Regular user' }}</dd></div><div><dt>Access role</dt><dd>{{ account.user.role }}</dd></div><div><dt>Real-world identity</dt><dd>{{ account.user.accountType === 'anonymous' ? 'Not required' : 'Email provided' }}</dd></div></dl>
         <form v-if="account.user.role !== 'counselor'" class="settings-form" @submit.prevent="saveDisplayName">
           <Field label="Display name" :hint="account.user.accountType === 'anonymous' ? 'Optional. Leave blank to remain a private account.' : 'Shown on your account and to people you connect with.'">
             <input v-model="displayNameDraft" class="control" maxlength="80" autocomplete="nickname" />
           </Field>
-          <BaseButton type="submit" variant="secondary" :disabled="profileLoading">{{ profileLoading ? 'Saving…' : 'Save display name' }}</BaseButton>
+          <Field label="About you — optional" hint="A short profile introduction, up to 1000 characters.">
+            <textarea v-model="profileBioDraft" class="control textarea" rows="4" maxlength="1000" />
+          </Field>
+          <BaseButton type="submit" variant="secondary" :disabled="profileLoading">{{ profileLoading ? 'Saving…' : 'Save profile' }}</BaseButton>
         </form>
         <Notice title="Recovery and privacy">Your public ID is for identification in ShepherdConnect, not authentication. Keep your password and one-time recovery code private. Private mode avoids requiring real-world identity, but does not guarantee technical untraceability.</Notice>
         <div class="settings-actions"><BaseButton variant="secondary" :disabled="profileLoading" @click="rotateRecoveryCode">{{ profileLoading ? 'Please wait…' : 'Rotate recovery code' }}</BaseButton><BaseButton variant="danger" :disabled="profileLoading" @click="deactivateAccount">Deactivate account</BaseButton></div>
-        <p v-if="profileStatus && !recoveryCode" class="form-error" role="alert">{{ profileStatus }}</p>
+        <p
+          v-if="profileStatus && !recoveryCode"
+          :class="['Account profile updated.', 'Counselor profile updated.', 'Profile picture updated.', 'Profile picture removed.'].includes(profileStatus) ? 'settings-success' : 'form-error'"
+          :role="['Account profile updated.', 'Counselor profile updated.', 'Profile picture updated.', 'Profile picture removed.'].includes(profileStatus) ? 'status' : 'alert'"
+        >{{ profileStatus }}</p>
         <div v-if="recoveryCode" class="recovery-display settings-recovery" aria-live="polite"><strong>{{ profileStatus }}</strong><code>{{ recoveryCode }}</code><BaseButton variant="secondary" @click="copyRecoveryCode">{{ recoveryCopied ? 'Copied' : 'Copy recovery code' }}</BaseButton><small>This code is shown only now. Save it securely; the old code is invalid.</small></div>
       </section>
       <section
@@ -2313,7 +2606,6 @@ function counselorInitials(name: string) {
         </div>
       </section>
     </template>
-    <Notice v-else title="Demo workspace">Account settings and recovery are not connected in the synthetic demo. Create a private or registered account to use these controls.</Notice>
   </AppShell>
 
   <div v-else-if="route.name === 'safe'" class="safe-page">

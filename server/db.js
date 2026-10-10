@@ -19,13 +19,17 @@ export function createPool(connectionString = process.env.DATABASE_URL) {
       }
     : undefined
 
-  return new Pool({
+  const pool = new Pool({
     connectionString,
     max: Number(process.env.DATABASE_POOL_SIZE || 10),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
     ssl,
   })
+  pool.on("error", (error) => {
+    console.error("PostgreSQL idle connection error:", error.message)
+  })
+  return pool
 }
 
 export async function inTransaction(pool, callback) {

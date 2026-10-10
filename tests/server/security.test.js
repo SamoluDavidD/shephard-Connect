@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { access, mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import argon2 from "argon2"
@@ -24,11 +24,18 @@ class FakePool {
   users = new Map()
   sessions = new Map()
   conversation = null
+  conversations = []
+  messages = []
+  hiddenMessages = []
+  lastQuery = ""
   application = null
   counselorProfile = null
   qualifications = []
   documents = []
   reviews = []
+  notifications = []
+  userProfile = { display_name: null, bio: "" }
+  userProfiles = new Map()
   siteSettings = {
     homepage_image: null,
     homepage_image_alt: null,
@@ -42,6 +49,7 @@ class FakePool {
 
   async query(sql, params = []) {
     const queryText = sql.replace(/\s+/g, " ").trim()
+    this.lastQuery = queryText
 
     if (queryText === "SELECT 1") return { rows: [{ "?column?": 1 }], rowCount: 1 }
     if (queryText.startsWith("SELECT homepage_image_alt, homepage_image_updated_at")) {
@@ -115,7 +123,62 @@ class FakePool {
     }
     if (queryText.startsWith("INSERT INTO user_profiles")) {
       this.user.display_name = params[1]
+      this.userProfile = {
+        user_id: params[0],
+        display_name: params[1],
+        bio: "",
+        picture_storage_key: null,
+        picture_mime_type: null,
+        updated_at: new Date().toISOString(),
+      }
+      this.userProfiles.set(params[0], this.userProfile)
       return { rows: [], rowCount: 1 }
+    }
+    if (queryText.startsWith("SELECT display_name, bio, picture_storage_key, updated_at FROM user_profiles")) {
+      const profile = this.userProfiles.get(params[0])
+      return { rows: profile ? [{ ...profile }] : [], rowCount: profile ? 1 : 0 }
+    }
+    if (queryText.startsWith("SELECT picture_storage_key, picture_mime_type FROM user_profiles")) {
+      const profile = this.userProfiles.get(params[0])
+      return { rows: profile ? [{ ...profile }] : [], rowCount: profile ? 1 : 0 }
+    }
+    if (queryText.startsWith("SELECT picture_storage_key FROM user_profiles")) {
+      const profile = this.userProfiles.get(params[0])
+      return { rows: profile ? [{ picture_storage_key: profile.picture_storage_key }] : [], rowCount: profile ? 1 : 0 }
+    }
+    if (queryText.startsWith("UPDATE user_profiles SET picture_storage_key = $2")) {
+      const profile = this.userProfiles.get(params[0])
+      if (profile) {
+        profile.picture_storage_key = params[1]
+        profile.picture_mime_type = params[2]
+        profile.updated_at = new Date().toISOString()
+        this.userProfile = profile
+      }
+      return { rows: [], rowCount: profile ? 1 : 0 }
+    }
+    if (queryText.startsWith("UPDATE user_profiles SET picture_storage_key = NULL")) {
+      const profile = this.userProfiles.get(params[0])
+      if (profile) {
+        profile.picture_storage_key = null
+        profile.picture_mime_type = null
+        profile.updated_at = new Date().toISOString()
+        this.userProfile = profile
+      }
+      return { rows: [], rowCount: profile ? 1 : 0 }
+    }
+    if (queryText.startsWith("UPDATE user_profiles SET display_name = $2, bio = COALESCE")) {
+      const profile = this.userProfiles.get(params[0])
+      if (!profile) return { rows: [], rowCount: 0 }
+      profile.display_name = params[1]
+      if (params[2] !== null) profile.bio = params[2]
+      profile.updated_at = new Date().toISOString()
+      this.userProfile = profile
+      const user = this.users.get(params[0])
+      if (user) user.display_name = profile.display_name
+      return {
+        rows: [{ display_name: profile.display_name }],
+        rowCount: user ? 1 : 0,
+      }
     }
     if (queryText.startsWith("UPDATE user_profiles SET display_name")) {
       const user = this.users.get(params[0])
@@ -466,7 +529,27 @@ class FakePool {
       return { rows: requested, rowCount: requested.length }
     }
     if (queryText.startsWith("INSERT INTO user_notifications")) {
+      this.notifications.push({
+        user_id: params[0],
+        kind: params[1],
+        title: params[2],
+        message: params[3],
+        id: `notification-${this.notifications.length + 1}`,
+        created_at: new Date().toISOString(),
+        read_at: null,
+      })
       return { rows: [], rowCount: 1 }
+    }
+    if (queryText.startsWith("SELECT id, kind, title, message, created_at, read_at FROM user_notifications")) {
+      const rows = this.notifications.filter((item) => item.user_id === params[0])
+      return { rows, rowCount: rows.length }
+    }
+    if (queryText.startsWith("UPDATE user_notifications SET read_at")) {
+      const notification = this.notifications.find(
+        (item) => item.id === params[0] && item.user_id === params[1],
+      )
+      if (notification) notification.read_at = new Date().toISOString()
+      return { rows: notification ? [{ id: notification.id }] : [], rowCount: notification ? 1 : 0 }
     }
     if (queryText.startsWith("INSERT INTO sessions")) {
       this.sessions.set(Buffer.from(params[1]).toString("hex"), {
@@ -530,6 +613,76 @@ class FakePool {
       return this.conversation?.public_id === String(params[0]).toUpperCase()
         ? { rows: [this.conversation], rowCount: 1 }
         : { rows: [], rowCount: 0 }
+    }
+    if (queryText.startsWith("SELECT c.public_id, c.status, c.updated_at")) {
+      return { rows: this.conversations, rowCount: this.conversations.length }
+    }
+    if (queryText.startsWith("SELECT m.id, m.body")) {
+      const visible = this.messages.filter((message) =>
+        !this.hiddenMessages.some(
+          (hidden) => hidden.message_id === message.id && hidden.user_id === params[1],
+        ),
+      )
+      return { rows: visible, rowCount: visible.length }
+    }
+    if (queryText.startsWith("SELECT m.id, m.sender_id")) {
+      const message = this.messages.find((item) => item.id === params[0])
+      return message
+        ? {
+            rows: [{
+              ...message,
+              conversation_id: this.conversation.id,
+              seeker_id: this.conversation.seeker_id,
+              counselor_id: this.conversation.counselor_id,
+            }],
+            rowCount: 1,
+          }
+        : { rows: [], rowCount: 0 }
+    }
+    if (queryText.startsWith("INSERT INTO messages (conversation_id, sender_id, body)")) {
+      const message = {
+        id: `message-${this.messages.length + 1}`,
+        body: params[2],
+        created_at: new Date().toISOString(),
+        sender_public_id: this.user.public_id,
+        sender_role: this.user.role,
+        sender_display_name: this.user.display_name || this.user.public_id,
+      }
+      this.messages.push(message)
+      return { rows: [message], rowCount: 1 }
+    }
+    if (queryText.startsWith("UPDATE messages SET body = $2")) {
+      const message = this.messages.find((item) => item.id === params[0])
+      if (!message) return { rows: [], rowCount: 0 }
+      message.body = params[1]
+      message.edited_at = new Date().toISOString()
+      return { rows: [{ ...message }], rowCount: 1 }
+    }
+    if (queryText.startsWith("UPDATE messages SET body = 'This message was deleted'")) {
+      const message = this.messages.find((item) => item.id === params[0])
+      if (!message) return { rows: [], rowCount: 0 }
+      message.body = "This message was deleted"
+      message.deleted_at = new Date().toISOString()
+      return { rows: [], rowCount: 1 }
+    }
+    if (queryText.startsWith("INSERT INTO message_user_hides")) {
+      if (!this.hiddenMessages.some(
+        (hidden) => hidden.message_id === params[0] && hidden.user_id === params[1],
+      )) {
+        this.hiddenMessages.push({ message_id: params[0], user_id: params[1] })
+      }
+      return { rows: [], rowCount: 1 }
+    }
+    if (queryText.startsWith("UPDATE messages SET delivered_at = COALESCE")) {
+      const timestamp = new Date().toISOString()
+      const updated = this.messages.filter(
+        (message) => params[1].includes(message.id) && message.sender_id !== params[2],
+      )
+      for (const message of updated) {
+        message.delivered_at ||= timestamp
+        if (queryText.includes("read_at = COALESCE")) message.read_at ||= timestamp
+      }
+      return { rows: updated.map(({ id }) => ({ id })), rowCount: updated.length }
     }
     if (queryText.startsWith("SELECT m.body")) {
       return { rows: [{ body: "Assigned message", sender_role: "counselor" }], rowCount: 1 }
@@ -1379,6 +1532,329 @@ describe("Express authentication and authorization", () => {
     expect(login.status).toBe(200)
   }, 30_000)
 
+  it("persists the user's optional profile bio and scopes notifications to their owner", async () => {
+    const pool = new FakePool()
+    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    const created = await request(app)
+      .post("/api/auth/anonymous")
+      .set("Origin", origin)
+      .send({ password: "a-long-private-password" })
+    expect(created.status).toBe(201)
+    const cookie = cookieFrom(created)
+
+    const profile = await request(app).get("/api/me/profile").set("Cookie", cookie)
+    expect(profile.status).toBe(200)
+    expect(profile.body.profile.bio).toBe("")
+
+    const saved = await request(app)
+      .patch("/api/me")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ displayName: "Jordan", bio: "A little about me." })
+    expect(saved.status).toBe(200)
+    expect(saved.body.user.displayName).toBe("Jordan")
+    expect(pool.userProfile).toMatchObject({
+      display_name: "Jordan",
+      bio: "A little about me.",
+    })
+
+    pool.notifications = [
+      {
+        id: "91b2a435-f881-4657-b1de-8c7c43e118ec",
+        user_id: "internal-user-id",
+        kind: "conversation_message",
+        title: "New counseling message",
+        message: "You have a new message in a counseling conversation.",
+        created_at: new Date().toISOString(),
+        read_at: null,
+      },
+      {
+        id: "52bbbcdf-bef2-44ce-a799-8fa6c6c56300",
+        user_id: "another-user",
+        kind: "conversation_message",
+        title: "Private notification",
+        message: "Not for this user.",
+        created_at: new Date().toISOString(),
+        read_at: null,
+      },
+    ]
+    const notifications = await request(app).get("/api/notifications").set("Cookie", cookie)
+    expect(notifications.status).toBe(200)
+    expect(notifications.body.notifications).toHaveLength(1)
+    expect(notifications.body.notifications[0].id).toBe(pool.notifications[0].id)
+
+    const otherUsersNotification = await request(app)
+      .patch("/api/notifications/52bbbcdf-bef2-44ce-a799-8fa6c6c56300/read")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+    expect(otherUsersNotification.status).toBe(404)
+    expect(pool.notifications[1].read_at).toBeNull()
+
+    const markedRead = await request(app)
+      .patch("/api/notifications/91b2a435-f881-4657-b1de-8c7c43e118ec/read")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+    expect(markedRead.status).toBe(204)
+    expect(pool.notifications[0].read_at).toBeTruthy()
+  })
+
+  it("stores, serves, replaces, and removes a private profile picture for its owner", async () => {
+    const pool = new FakePool()
+    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherd-profile-picture-test-"))
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+      privateDocumentPath: privateDirectory,
+    })
+
+    try {
+      const created = await request(app)
+        .post("/api/auth/register")
+        .set("Origin", origin)
+        .send({
+          email: "profile-picture@example.com",
+          displayName: "Profile Picture User",
+          password: "a-long-secure-password",
+          consent: true,
+        })
+      expect(created.status).toBe(201)
+      const cookie = cookieFrom(created)
+      expect(pool.userProfiles.has("internal-user-id")).toBe(true)
+
+      const noPicture = await request(app)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookie)
+      expect(noPicture.status).toBe(404)
+
+      const uploaded = await request(app)
+        .put("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+        .attach("picture", Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+          filename: "first.jpg",
+          contentType: "image/jpeg",
+        })
+      expect(uploaded.status, JSON.stringify(uploaded.body)).toBe(200)
+      expect(pool.userProfile.picture_mime_type).toBe("image/jpeg")
+      expect(pool.userProfile.picture_storage_key).toMatch(/^[a-f0-9]{64}$/)
+      await expect(access(path.join(privateDirectory, pool.userProfile.picture_storage_key))).resolves.toBeUndefined()
+
+      const served = await request(app).get("/api/me/profile/picture").set("Cookie", cookie)
+      expect(served.status).toBe(200)
+      expect(served.headers["content-type"]).toContain("image/jpeg")
+      expect(served.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+      const oldStorageKey = pool.userProfile.picture_storage_key
+      const replaced = await request(app)
+        .put("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+        .field("targetUserId", "another-user")
+        .attach("picture", Buffer.from([
+          0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+          0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+          0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        ]), {
+          filename: "replacement.png",
+          contentType: "image/png",
+        })
+      expect(replaced.status).toBe(200)
+      expect(pool.userProfile.picture_mime_type).toBe("image/png")
+      expect(pool.userProfile.picture_storage_key).not.toBe(oldStorageKey)
+      await expect(access(path.join(privateDirectory, oldStorageKey))).rejects.toMatchObject({ code: "ENOENT" })
+
+      const removed = await request(app)
+        .delete("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+      expect(removed.status).toBe(204)
+      expect(pool.userProfile.picture_storage_key).toBeNull()
+      expect(pool.userProfile.picture_mime_type).toBeNull()
+      const unavailable = await request(app).get("/api/me/profile/picture").set("Cookie", cookie)
+      expect(unavailable.status).toBe(404)
+
+      const unsupported = await request(app)
+        .put("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+        .attach("picture", Buffer.from("not an image"), {
+          filename: "photo.png",
+          contentType: "image/png",
+        })
+      expect(unsupported.status).toBe(400)
+
+      const mismatchedMime = await request(app)
+        .put("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+        .attach("picture", Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+          filename: "mismatched.png",
+          contentType: "image/png",
+        })
+      expect(mismatchedMime.status).toBe(400)
+
+      const oversized = await request(app)
+        .put("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+        .attach("picture", Buffer.alloc(5 * 1024 * 1024 + 1), {
+          filename: "oversized.jpg",
+          contentType: "image/jpeg",
+        })
+      expect(oversized.status).toBe(413)
+      expect(oversized.body.error).toContain("5 MB")
+    } finally {
+      await rm(privateDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("accepts an optional registration picture and keeps it owner-private", async () => {
+    const pool = new FakePool()
+    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherd-registration-picture-test-"))
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+      privateDocumentPath: privateDirectory,
+    })
+
+    try {
+      const created = await request(app)
+        .post("/api/auth/register")
+        .set("Origin", origin)
+        .field("profile", JSON.stringify({
+          email: "registered-picture@example.com",
+          displayName: "Registered Picture",
+          password: "a-long-secure-password",
+          consent: true,
+        }))
+        .attach("profilePicture", Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+          filename: "picture.jpg",
+          contentType: "image/jpeg",
+        })
+      expect(created.status).toBe(201)
+      const cookie = cookieFrom(created)
+      expect(pool.userProfile.picture_mime_type).toBe("image/jpeg")
+      expect(pool.userProfile.picture_storage_key).toMatch(/^[a-f0-9]{64}$/)
+
+      const privatePicture = await request(app)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookie)
+      expect(privatePicture.status).toBe(200)
+      expect(privatePicture.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+      const logout = await request(app)
+        .post("/api/auth/logout")
+        .set("Origin", origin)
+        .set("Cookie", cookie)
+      expect(logout.status).toBe(204)
+      const login = await request(app)
+        .post("/api/auth/login")
+        .set("Origin", origin)
+        .send({
+          login: "registered-picture@example.com",
+          password: "a-long-secure-password",
+        })
+      expect(login.status).toBe(200)
+      const afterLogin = await request(app)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookieFrom(login))
+      expect(afterLogin.status).toBe(200)
+      expect(afterLogin.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+      const restartedApp = createApp({
+        pool,
+        allowedOrigins: origin,
+        secureCookies: false,
+        privateDocumentPath: privateDirectory,
+      })
+      const afterRestart = await request(restartedApp)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookieFrom(login))
+      expect(afterRestart.status).toBe(200)
+      expect(afterRestart.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+      const otherUser = {
+        id: "unrelated-user-id",
+        public_id: "SC-23456789",
+        account_type: "registered",
+        role: "registered",
+        status: "active",
+        display_name: "Unrelated user",
+      }
+      pool.users.set(otherUser.id, otherUser)
+      const otherToken = createSessionToken()
+      pool.sessions.set(hashSessionToken(otherToken).toString("hex"), {
+        revoked: false,
+        user: otherUser,
+      })
+      const otherCookie = `sc_session=${otherToken}`
+      const unrelatedPicture = await request(app)
+        .get("/api/me/profile/picture?userId=internal-user-id")
+        .set("Cookie", otherCookie)
+      expect(unrelatedPicture.status).toBe(404)
+
+      const unauthorizedReplacement = await request(app)
+        .put("/api/me/profile/picture")
+        .set("Origin", origin)
+        .set("Cookie", otherCookie)
+        .field("targetUserId", "internal-user-id")
+        .attach("picture", Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+          filename: "attempt.jpg",
+          contentType: "image/jpeg",
+        })
+      expect(unauthorizedReplacement.status).toBe(404)
+      expect(pool.userProfile.picture_storage_key).toMatch(/^[a-f0-9]{64}$/)
+      expect((await request(app).get("/api/me/profile/picture")).status).toBe(401)
+    } finally {
+      await rm(privateDirectory, { recursive: true, force: true })
+    }
+  })
+
+  it("allows counselor registration with a profile picture and no supporting documents", async () => {
+    const pool = new FakePool()
+    const privateDirectory = await mkdtemp(path.join(os.tmpdir(), "shepherd-counselor-picture-test-"))
+    const app = createApp({
+      pool,
+      allowedOrigins: origin,
+      secureCookies: false,
+      privateDocumentPath: privateDirectory,
+    })
+
+    try {
+      const submitted = await request(app)
+        .post("/api/auth/counselor")
+        .set("Origin", origin)
+        .field("application", JSON.stringify(basicCounselorApplication()))
+        .attach("profilePicture", Buffer.from([0xff, 0xd8, 0xff, 0xd9]), {
+          filename: "counselor.jpg",
+          contentType: "image/jpeg",
+        })
+      expect(submitted.status).toBe(201)
+      expect(pool.documents).toHaveLength(0)
+      expect(pool.userProfile.picture_mime_type).toBe("image/jpeg")
+      expect(pool.userProfile.picture_storage_key).toMatch(/^[a-f0-9]{64}$/)
+
+      const cookie = cookieFrom(submitted)
+      const picture = await request(app)
+        .get("/api/me/profile/picture")
+        .set("Cookie", cookie)
+      expect(picture.status).toBe(200)
+      expect(picture.body).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+      const approved = await request(app)
+        .patch(`/api/admin/counselor-applications/${submitted.body.application.publicRef}/review`)
+        .set("Origin", origin)
+        .set("Cookie", addSuperAdmin(pool))
+        .send({ action: "APPROVED" })
+      expect(approved.status).toBe(200)
+      expect(pool.application.status).toBe("APPROVED")
+    } finally {
+      await rm(privateDirectory, { recursive: true, force: true })
+    }
+  })
+
   it("denies writes from unapproved origins and denies SuperAdmin access to conversations", async () => {
     const pool = new FakePool()
     const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
@@ -1438,5 +1914,245 @@ describe("Express authentication and authorization", () => {
       .get("/api/conversations/CV-23456789/messages")
       .set("Cookie", `sc_session=${token}`)
     expect(response.status).toBe(404)
+  })
+
+  it("returns persisted conversation history to its participants with privacy-safe sender labels", async () => {
+    const pool = new FakePool()
+    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    pool.user = {
+      id: "assigned-counselor",
+      public_id: "CO-23456789",
+      account_type: "counselor",
+      role: "counselor",
+      status: "active",
+      display_name: "Counselor",
+    }
+    pool.conversation = {
+      id: "conversation-id",
+      public_id: "CV-23456789",
+      seeker_id: "anonymous-seeker",
+      counselor_id: "assigned-counselor",
+      status: "open",
+    }
+    pool.conversations = [{
+      public_id: pool.conversation.public_id,
+      status: "open",
+      updated_at: "2026-10-10T07:00:00.000Z",
+      other_party_public_id: "AN-23456789",
+      other_party_display_name: "AN-23456789",
+    }]
+    pool.messages = [
+      {
+        id: "message-1",
+        body: "Thank you for reaching out.",
+        created_at: "2026-10-09T10:12:00.000Z",
+        sender_public_id: "CO-23456789",
+        sender_role: "counselor",
+        sender_display_name: "Counselor",
+      },
+      {
+        id: "message-2",
+        body: "I have been carrying a lot of worry.",
+        created_at: "2026-10-09T10:14:00.000Z",
+        sender_public_id: "AN-23456789",
+        sender_role: "anonymous",
+        sender_display_name: "AN-23456789",
+      },
+    ]
+    const token = createSessionToken()
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+      user: pool.user,
+    })
+    const cookie = `sc_session=${token}`
+
+    const conversations = await request(app)
+      .get("/api/conversations")
+      .set("Cookie", cookie)
+    expect(conversations.status).toBe(200)
+    expect(conversations.body.conversations[0].other_party_display_name).toBe("AN-23456789")
+    expect(pool.lastQuery).toContain(
+      "CASE WHEN other.account_type = 'anonymous' THEN other.public_id",
+    )
+
+    const history = await request(app)
+      .get("/api/conversations/CV-23456789/messages")
+      .set("Cookie", cookie)
+    expect(history.status).toBe(200)
+    expect(history.body.messages).toHaveLength(2)
+    expect(history.body.messages[0]).toMatchObject({
+      id: "message-1",
+      sender_public_id: "CO-23456789",
+      created_at: "2026-10-09T10:12:00.000Z",
+    })
+    expect(history.body.messages[1].sender_display_name).toBe("AN-23456789")
+    expect(pool.lastQuery).toContain(
+      "CASE WHEN sender.account_type = 'anonymous' THEN sender.public_id",
+    )
+
+    const sent = await request(app)
+      .post("/api/conversations/CV-23456789/messages")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ body: "I am here and ready to listen." })
+    expect(sent.status).toBe(201)
+    expect(pool.messages[2].body).toBe("I am here and ready to listen.")
+
+    const refreshedHistory = await request(app)
+      .get("/api/conversations/CV-23456789/messages")
+      .set("Cookie", cookie)
+    expect(refreshedHistory.status).toBe(200)
+    expect(refreshedHistory.body.messages).toHaveLength(3)
+    expect(refreshedHistory.body.messages[2].sender_public_id).toBe("CO-23456789")
+
+    pool.user = {
+      id: "unrelated-user",
+      public_id: "AN-99999999",
+      account_type: "anonymous",
+      role: "anonymous",
+      status: "active",
+    }
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+      user: pool.user,
+    })
+    const unrelatedHistory = await request(app)
+      .get("/api/conversations/CV-23456789/messages")
+      .set("Cookie", cookie)
+    expect(unrelatedHistory.status).toBe(404)
+  })
+
+  it("authorizes message edits, participant-only hiding, global deletion, and read receipts", async () => {
+    const pool = new FakePool()
+    const app = createApp({ pool, allowedOrigins: origin, secureCookies: false })
+    pool.user = {
+      id: "assigned-counselor",
+      public_id: "CO-23456789",
+      account_type: "counselor",
+      role: "counselor",
+      status: "active",
+      display_name: "Counselor",
+    }
+    pool.conversation = {
+      id: "conversation-id",
+      public_id: "CV-23456789",
+      seeker_id: "anonymous-seeker",
+      counselor_id: "assigned-counselor",
+      status: "open",
+    }
+    const ownMessageId = "11111111-1111-4111-8111-111111111111"
+    const otherMessageId = "22222222-2222-4222-8222-222222222222"
+    pool.messages = [
+      {
+        id: ownMessageId,
+        conversation_id: pool.conversation.id,
+        sender_id: pool.user.id,
+        body: "Original counselor message",
+        created_at: "2026-10-09T10:12:00.000Z",
+      },
+      {
+        id: otherMessageId,
+        conversation_id: pool.conversation.id,
+        sender_id: pool.conversation.seeker_id,
+        body: "Anonymous message",
+        created_at: "2026-10-09T10:14:00.000Z",
+      },
+    ]
+    const token = createSessionToken()
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+      user: pool.user,
+    })
+    const cookie = `sc_session=${token}`
+
+    const edited = await request(app)
+      .patch(`/api/messages/${ownMessageId}`)
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ body: "Updated counselor message" })
+    expect(edited.status).toBe(200)
+    expect(pool.messages[0].body).toBe("Updated counselor message")
+    expect(pool.messages[0].edited_at).toBeTruthy()
+
+    const unauthorizedEdit = await request(app)
+      .patch(`/api/messages/${otherMessageId}`)
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ body: "Attempt to edit someone else's message" })
+    expect(unauthorizedEdit.status).toBe(403)
+
+    const hidden = await request(app)
+      .delete(`/api/messages/${otherMessageId}`)
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ scope: "for_me" })
+    expect(hidden.status).toBe(200)
+    expect(pool.hiddenMessages).toContainEqual({
+      message_id: otherMessageId,
+      user_id: pool.user.id,
+    })
+    expect(pool.messages[1].body).toBe("Anonymous message")
+
+    pool.user = {
+      id: pool.conversation.seeker_id,
+      public_id: "AN-23456789",
+      account_type: "anonymous",
+      role: "anonymous",
+      status: "active",
+    }
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+      user: pool.user,
+    })
+    const otherParticipantHistory = await request(app)
+      .get("/api/conversations/CV-23456789/messages")
+      .set("Cookie", cookie)
+    expect(otherParticipantHistory.status).toBe(200)
+    expect(otherParticipantHistory.body.messages.some((item) => item.id === otherMessageId)).toBe(true)
+
+    pool.user = {
+      id: "assigned-counselor",
+      public_id: "CO-23456789",
+      account_type: "counselor",
+      role: "counselor",
+      status: "active",
+      display_name: "Counselor",
+    }
+    pool.sessions.set(hashSessionToken(token).toString("hex"), {
+      revoked: false,
+      user: pool.user,
+    })
+    const unauthorizedGlobalDelete = await request(app)
+      .delete(`/api/messages/${otherMessageId}`)
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ scope: "for_everyone" })
+    expect(unauthorizedGlobalDelete.status).toBe(403)
+
+    const globallyDeleted = await request(app)
+      .delete(`/api/messages/${ownMessageId}`)
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ scope: "for_everyone" })
+    expect(globallyDeleted.status).toBe(200)
+    expect(pool.messages[0].body).toBe("This message was deleted")
+    expect(pool.messages[0].deleted_at).toBeTruthy()
+
+    const receipt = await request(app)
+      .post("/api/conversations/CV-23456789/receipts")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ messageIds: [otherMessageId, ownMessageId], state: "read" })
+    expect(receipt.status).toBe(200)
+    expect(pool.messages[1].delivered_at).toBeTruthy()
+    expect(pool.messages[1].read_at).toBeTruthy()
+    expect(pool.messages[0].read_at).toBeUndefined()
+
+    const deliveryReceipt = await request(app)
+      .post("/api/conversations/CV-23456789/receipts")
+      .set("Origin", origin)
+      .set("Cookie", cookie)
+      .send({ messageIds: [otherMessageId], state: "delivered" })
+    expect(deliveryReceipt.status).toBe(200)
   })
 })

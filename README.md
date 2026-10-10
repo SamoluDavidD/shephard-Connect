@@ -11,16 +11,19 @@ ShepherdConnect is a responsive Vue 3 application for the Great Commission Movem
 - Need selection, approved counselor directory, filters, and profiles
 - Validated counseling request workflow with idempotency and rate limiting
 - Seeker and counselor dashboards with request status handling
-- Engagement-scoped messaging API and functional synthetic chat preview
+- PostgreSQL-backed conversation history with participant-only access and anonymous-safe sender labels
+- Sender-only message editing, per-participant hiding, sender-authorized global deletion, and persisted read receipts
+- Engagement-scoped messaging API and participant-authorized chat history
 - Quick Exit to a neutral screen and safeguarding concern submission
-- Approved-resource presentation, saving, and Scripture licensing notice
+- Guidance route shows an explicit empty state; resource publishing is not connected
 - Canonical six-stage discipleship journey
 - Administration and aggregate-reporting interfaces with privacy boundaries
 - Express authentication with Argon2id credentials and database-backed HttpOnly sessions
-- PostgreSQL migrations, role authorization, application audit history, and in-app notifications
+- PostgreSQL migrations, role authorization, application audit history, and role-aware in-app notifications for counselor applications, request updates, and new messages
+- Account settings for editing a display name, optional short profile bio, and optional private profile picture
 - Responsive mobile, tablet, and desktop layouts; focus states and reduced-motion support
 
-The role switcher appears only in the **synthetic demo workspace**. It does not change server permissions.
+Demo logins, role simulation, and fabricated dashboard records are not included in the application.
 
 ## Stack
 
@@ -105,12 +108,21 @@ A counselor application starts as `PENDING_APPROVAL`; a SuperAdmin can approve a
 | GET | `/api/admin/site-settings` | SuperAdmin |
 | POST | `/api/admin/site-settings/homepage-image` | SuperAdmin; JPEG, PNG, or WebP up to 5 MB |
 | DELETE | `/api/admin/site-settings/homepage-image` | SuperAdmin |
-| PATCH | `/api/me` | Own display name |
+| GET | `/api/me/profile` | Own display name and bio |
+| PATCH | `/api/me` | Own display name and optional bio (up to 1,000 characters) |
 | PATCH | `/api/me/password` | Own account; current password required |
+| GET | `/api/conversations/:publicId/messages` | Assigned conversation participant |
+| POST | `/api/conversations/:publicId/receipts` | Assigned recipient; acknowledges message IDs as delivered or read |
+| PATCH | `/api/messages/:id` | Original sender; edit text |
+| DELETE | `/api/messages/:id` | Participant; `{ "scope": "for_me" }` or original sender with `{ "scope": "for_everyone" }` |
+
+Message editing and deletion have no time-window restriction. “Delete for me” stores a participant-specific hide record. “Delete for everyone” replaces the stored body with a neutral deletion notice; the original text is not copied to the audit log. Read receipts are recorded when the authenticated recipient opens the conversation. Delivery means the recipient account fetched the message history and acknowledged the message IDs; it does not prove device-level or push-notification delivery.
+
+Conversation updates use authenticated polling while the chat is open (every five seconds); there is no WebSocket transport. This provides eventual updates while connected rather than push-based real-time delivery.
 
 ## Persistence and migrations
 
-Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. Migration `003_site_settings.sql` adds a singleton setting for the public homepage image and its accessible description; migration `004_optional_counselor_information.sql` makes nonessential counselor-profile and professional details nullable and removes the license-authority dependency while preserving existing records and uploaded documents. Homepage image bytes are stored in PostgreSQL, so they persist across API restarts. Homepage image uploads are restricted to SuperAdmins and validated by file signature and a 5 MB size limit. The homepage image is publicly readable and versioned for cache invalidation. No migration constraint requires supporting-document records.
+Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. Migration `003_site_settings.sql` adds a singleton setting for the public homepage image and its accessible description; migration `004_optional_counselor_information.sql` makes nonessential counselor-profile and professional details nullable and removes the license-authority dependency while preserving existing records and uploaded documents. Migration `006_user_notification_kinds.sql` enables notification events for counseling requests and messages; migration `007_user_profile_bio.sql` adds the optional short bio to user profiles; migration `008_user_profile_pictures.sql` adds nullable storage-key and MIME metadata for profile pictures without changing existing accounts. Migration `009_message_controls_and_receipts.sql` adds message edit/deletion/receipt timestamps and participant-specific message hiding without removing existing messages. Profile pictures use opaque names in the private document directory, accept signature-validated JPEG, PNG, and WebP images up to 5 MB, and are available only through authenticated owner-scoped endpoints. Homepage image bytes are stored in PostgreSQL, so they persist across API restarts. Homepage image uploads are restricted to SuperAdmins and validated by file signature and a 5 MB size limit. The homepage image is publicly readable and versioned for cache invalidation. No migration constraint requires supporting-document records.
 
 Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names; original names and storage paths are never exposed as public URLs. Production deployments should use a private persistent volume with encryption at rest, restricted service access, backups, and a tested retention/deletion policy. The authenticated API streams file contents only to the applicant or a SuperAdmin reviewer.
 
@@ -121,18 +133,19 @@ Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names
 - SuperAdmins can update public homepage artwork; these changes are recorded in the append-only audit log.
 - Password changes require the current password and revoke the account's other active sessions.
 - Message content is not copied into audit events or notification helpers.
+- Conversation messages are stored in PostgreSQL without automatic expiration; only assigned participants can retrieve them. Per-participant hiding and sender-authorized global message deletion are available; deleting a conversation is not supported.
 - The service does not claim end-to-end encryption.
 - State-changing requests require an exact configured `APP_ORIGINS` match.
 - Private mode minimizes displayed identity but is not a guarantee of technical anonymity.
-- Never enter real counseling disclosures into the synthetic demo workspace.
+- Automated test fixtures are confined to test runs and are not seeded at startup or exposed as production accounts.
 - Application notifications are in-app database notifications; external email or SMS delivery is not configured.
 
 ## Verification completed
 
 - `pnpm build` completes the Vue TypeScript check and production Vite build.
-- `pnpm test` passes: 21 tests across 2 test files, including an existing regular account applying for counselor access without creating a duplicate identity.
-- All five PostgreSQL migrations were applied successfully to the configured Supabase PostgreSQL 17.11 database. A repeat migration run completed without reapplying them.
-- Live schema verification confirmed 20 public tables and all five migration ledger entries.
+- `pnpm test` passes: 26 tests across 2 test files, including participant-scoped conversation-history access, anonymous-safe sender labels, and private profile-picture registration/upload/replacement/removal, validation, and access control.
+- All eight PostgreSQL migrations were applied successfully to the configured Supabase PostgreSQL 17.11 database. A repeat migration run completed without reapplying them.
+- Live schema verification confirmed 20 public tables and all eight migration ledger entries.
 - The Express `/health` route and public counselor API succeeded against the live database; unauthenticated `/api/me` returned 401 as expected.
 - The bootstrap SuperAdmin authenticated through the live API, received the expected SuperAdmin role, and successfully logged out; the revoked session then returned 401.
 - Admin settings now support persistent homepage image upload/removal with accessible alt text, and account settings support display-name and password updates.

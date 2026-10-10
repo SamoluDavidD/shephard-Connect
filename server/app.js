@@ -31,12 +31,19 @@ const documentUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 10 * 1024 * 1024,
-    files: 5,
+    files: 6,
     fields: 32,
     fieldSize: 32 * 1024,
   },
 })
 const homepageImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+  },
+})
+const profilePictureUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024,
@@ -126,6 +133,27 @@ function getCookie(req, name) {
   } catch {
     return null
   }
+}
+
+function validateProfilePicture(file) {
+  const bytes = file.buffer
+  let detectedMime = null
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    detectedMime = "image/jpeg"
+  } else if (
+    bytes.length >= 24 &&
+    bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) &&
+    bytes.toString("ascii", 12, 16) === "IHDR"
+  ) {
+    detectedMime = "image/png"
+  } else if (
+    bytes.length >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    detectedMime = "image/webp"
+  }
+  return detectedMime && file.mimetype === detectedMime ? detectedMime : null
 }
 
 function writeSessionCookie(res, token, secure) {
@@ -467,9 +495,25 @@ export function createApp({
     }
   })
 
-  app.post("/api/auth/register", async (req, res, next) => {
-    const input = validateBody(registeredSchema.extend({ consent: z.literal(true) }), req, res)
-    if (!input) return
+  app.post("/api/auth/register", profilePictureUpload.single("profilePicture"), async (req, res, next) => {
+    let payload = req.body
+    if (req.file) {
+      try {
+        payload = JSON.parse(req.body.profile)
+      } catch {
+        return res.status(400).json({ error: "Check the submitted account information." })
+      }
+    }
+    const parsed = registeredSchema.extend({ consent: z.literal(true) }).safeParse(payload)
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Check the submitted account information." })
+    }
+    const input = parsed.data
+    const pictureMimeType = req.file ? validateProfilePicture(req.file) : null
+    if (req.file && !pictureMimeType) {
+      return res.status(400).json({ error: "Profile pictures must be valid JPEG, PNG, or WebP images." })
+    }
+    const storedKeys = []
     try {
       const result = await inTransaction(pool, async (client) => {
         const account = await createAccount(client, {
@@ -478,6 +522,16 @@ export function createApp({
           displayName: input.displayName,
           password: input.password,
         })
+        if (req.file && pictureMimeType) {
+          const storageKey = await savePrivateDocument(req.file, privateDocumentPath)
+          storedKeys.push(storageKey)
+          await client.query(
+            `UPDATE user_profiles
+             SET picture_storage_key = $2, picture_mime_type = $3, updated_at = now()
+             WHERE user_id = $1`,
+            [account.user.id, storageKey, pictureMimeType],
+          )
+        }
         await issueSession(client, account.user.id, res, secureCookies)
         return account
       })
@@ -487,6 +541,7 @@ export function createApp({
         recoveryCodeWarning: "Save this code privately. It is shown once and cannot be restored.",
       })
     } catch (error) {
+      if (storedKeys.length) await removePrivateDocuments(storedKeys, privateDocumentPath)
       if (error.code === "23505") {
         return res.status(409).json({ error: "An account could not be created with those details." })
       }
@@ -501,6 +556,7 @@ export function createApp({
       { name: "licenseDocuments", maxCount: 5 },
       { name: "supportingDocuments", maxCount: 5 },
       { name: "profilePhoto", maxCount: 1 },
+      { name: "profilePicture", maxCount: 1 },
     ]),
     async (req, res, next) => {
       let payload
@@ -521,7 +577,19 @@ export function createApp({
         profilePhoto: "profile_photo",
       }
       const files = uploadedFiles(req.files)
-      const preparedFiles = files.map((file) => ({
+      const profilePicture = req.files?.profilePicture?.[0]
+      const profilePictureMimeType = profilePicture
+        ? validateProfilePicture(profilePicture)
+        : null
+      if (profilePicture?.size > 5 * 1024 * 1024) {
+        return res.status(413).json({ error: "Profile pictures must be 5 MB or smaller." })
+      }
+      if (profilePicture && !profilePictureMimeType) {
+        return res.status(400).json({
+          error: "Profile pictures must be valid JPEG, PNG, or WebP images.",
+        })
+      }
+      const preparedFiles = files.filter((file) => file.fieldname !== "profilePicture").map((file) => ({
         file,
         category: categoryByField[file.fieldname],
         mimeType: validateDocumentFile(file, categoryByField[file.fieldname]),
@@ -545,6 +613,16 @@ export function createApp({
             displayName: input.preferredDisplayName,
             password: input.password,
           })
+          if (profilePicture && profilePictureMimeType) {
+            const storageKey = await savePrivateDocument(profilePicture, privateDocumentPath)
+            storedKeys.push(storageKey)
+            await client.query(
+              `UPDATE user_profiles
+               SET picture_storage_key = $2, picture_mime_type = $3, updated_at = now()
+               WHERE user_id = $1`,
+              [account.user.id, storageKey, profilePictureMimeType],
+            )
+          }
           const applicationRef = createPublicId("CA")
           const applicationResult = await client.query(
             `INSERT INTO counselor_applications (
@@ -844,6 +922,133 @@ export function createApp({
     res.json({ user: authUser(req) })
   })
 
+  app.get("/api/me/profile", requireAuth, async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT display_name, bio, picture_storage_key, updated_at
+         FROM user_profiles WHERE user_id = $1`,
+        [req.user.id],
+      )
+      if (!result.rows[0]) return res.status(404).json({ error: "Profile was not found." })
+      const profile = result.rows[0]
+      res.json({
+        profile: {
+          displayName: profile.display_name,
+          bio: profile.bio,
+          pictureUrl: profile.picture_storage_key
+            ? `/me/profile/picture?v=${encodeURIComponent(new Date(profile.updated_at).toISOString())}`
+            : null,
+        },
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.get("/api/me/profile/picture", requireAuth, async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT picture_storage_key, picture_mime_type
+         FROM user_profiles WHERE user_id = $1`,
+        [req.user.id],
+      )
+      const profile = result.rows[0]
+      if (!profile?.picture_storage_key) {
+        return res.status(404).json({ error: "No profile picture is set." })
+      }
+      if (!/^[a-f0-9]{64}$/.test(profile.picture_storage_key)) {
+        throw new Error("Stored profile picture key is invalid.")
+      }
+      const contents = await readFile(path.join(privateDocumentPath, profile.picture_storage_key))
+      res.set({
+        "Cache-Control": "private, no-store",
+        "Content-Type": profile.picture_mime_type,
+        "X-Content-Type-Options": "nosniff",
+      })
+      res.send(contents)
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return res.status(404).json({ error: "Profile picture is unavailable." })
+      }
+      next(error)
+    }
+  })
+
+  app.put("/api/me/profile/picture", requireAuth, profilePictureUpload.single("picture"), async (req, res, next) => {
+    if (!req.file) return res.status(400).json({ error: "Choose a profile picture to upload." })
+    const mimeType = validateProfilePicture(req.file)
+    if (!mimeType) {
+      return res.status(400).json({ error: "Profile pictures must be valid JPEG, PNG, or WebP images." })
+    }
+    let storageKey
+    let updated = false
+    try {
+      storageKey = await savePrivateDocument(req.file, privateDocumentPath)
+      const result = await inTransaction(pool, async (client) => {
+        const current = await client.query(
+          `SELECT picture_storage_key FROM user_profiles
+           WHERE user_id = $1 FOR UPDATE`,
+          [req.user.id],
+        )
+        if (!current.rows[0]) return null
+        await client.query(
+          `UPDATE user_profiles
+           SET picture_storage_key = $2, picture_mime_type = $3, updated_at = now()
+           WHERE user_id = $1`,
+          [req.user.id, storageKey, mimeType],
+        )
+        return { previousKey: current.rows[0].picture_storage_key }
+      })
+      if (result === null) {
+        await removePrivateDocuments([storageKey], privateDocumentPath)
+        return res.status(404).json({ error: "Profile was not found." })
+      }
+      updated = true
+      if (result.previousKey) {
+        try {
+          await removePrivateDocuments([result.previousKey], privateDocumentPath)
+        } catch (error) {
+          logger.error?.("Replaced profile picture could not be removed:", error.message)
+        }
+      }
+      res.json({ pictureUrl: `/me/profile/picture?v=${Date.now()}` })
+    } catch (error) {
+      if (storageKey && !updated) await removePrivateDocuments([storageKey], privateDocumentPath)
+      next(error)
+    }
+  })
+
+  app.delete("/api/me/profile/picture", requireAuth, async (req, res, next) => {
+    try {
+      const previousKey = await inTransaction(pool, async (client) => {
+        const current = await client.query(
+          `SELECT picture_storage_key FROM user_profiles
+           WHERE user_id = $1 FOR UPDATE`,
+          [req.user.id],
+        )
+        if (!current.rows[0]) return undefined
+        await client.query(
+          `UPDATE user_profiles
+           SET picture_storage_key = NULL, picture_mime_type = NULL, updated_at = now()
+           WHERE user_id = $1`,
+          [req.user.id],
+        )
+        return current.rows[0].picture_storage_key
+      })
+      if (previousKey === undefined) return res.status(404).json({ error: "Profile was not found." })
+      if (previousKey) {
+        try {
+          await removePrivateDocuments([previousKey], privateDocumentPath)
+        } catch (error) {
+          logger.error?.("Removed profile picture file could not be deleted:", error.message)
+        }
+      }
+      res.status(204).end()
+    } catch (error) {
+      next(error)
+    }
+  })
+
   app.get("/api/counselor/applications/me", requireAuth, async (req, res, next) => {
     if (req.user.account_type !== "counselor") {
       return res.status(404).json({ error: "The requested record was not found." })
@@ -1091,16 +1296,20 @@ export function createApp({
 
   app.patch("/api/me", requireAuth, async (req, res, next) => {
     const input = validateBody(
-      z.object({ displayName: z.string().trim().min(1).max(80).nullable() }),
+      z.object({
+        displayName: z.string().trim().min(1).max(80).nullable(),
+        bio: z.string().trim().max(1000).optional(),
+      }),
       req,
       res,
     )
     if (!input) return
     try {
       const result = await pool.query(
-        `UPDATE user_profiles SET display_name = $2, updated_at = now()
+        `UPDATE user_profiles
+         SET display_name = $2, bio = COALESCE($3, bio), updated_at = now()
          WHERE user_id = $1 RETURNING display_name`,
-        [req.user.id, input.displayName],
+        [req.user.id, input.displayName, input.bio ?? null],
       )
       await appendAudit(pool, req.user.id, "profile.updated", "user", req.user.id)
       res.json({ user: { ...authUser(req), displayName: result.rows[0].display_name } })
@@ -1689,6 +1898,12 @@ export function createApp({
             input.description,
           ],
         )
+        await client.query(
+          `INSERT INTO user_notifications (user_id, kind, title, message)
+           VALUES ($1, 'counseling_request', 'New counseling request',
+                   'A new request is ready for your review (' || $2 || ').')`,
+          [counselor.rows[0].user_id, created.rows[0].public_ref],
+        )
         await appendAudit(client, req.user.id, "counseling_request.created", "counseling_request", null)
         return created.rows[0]
       })
@@ -1745,6 +1960,13 @@ export function createApp({
             [request.id],
           )
         }
+        const recipientId = isSeeker ? request.counselor_id : request.seeker_id
+        await client.query(
+          `INSERT INTO user_notifications (user_id, kind, title, message)
+           VALUES ($1, 'counseling_request', 'Counseling request updated',
+                   'Request ' || $2 || ' is now ' || lower($3) || '.')`,
+          [recipientId, updated.rows[0].public_ref, input.status],
+        )
         await appendAudit(client, req.user.id, "counseling_request.status_changed", "counseling_request", request.id, {
           status: input.status,
         })
@@ -1791,7 +2013,9 @@ export function createApp({
       const result = await pool.query(
         `SELECT c.public_id, c.status, c.updated_at,
                 other.public_id AS other_party_public_id,
-                profile.display_name AS other_party_display_name
+                CASE WHEN other.account_type = 'anonymous' THEN other.public_id
+                     ELSE COALESCE(profile.display_name, other.public_id)
+                END AS other_party_display_name
          FROM counseling_conversations c
          JOIN users other ON other.id = c.${seeker ? "counselor_id" : "seeker_id"}
          LEFT JOIN user_profiles profile ON profile.user_id = other.id
@@ -1817,13 +2041,58 @@ export function createApp({
       }
       await appendAudit(pool, req.user.id, "conversation.messages_viewed", "conversation", record.id)
       const result = await pool.query(
-        `SELECT m.body, m.created_at, sender.public_id AS sender_public_id,
-                sender.role AS sender_role
-         FROM messages m JOIN users sender ON sender.id = m.sender_id
-         WHERE m.conversation_id = $1 ORDER BY m.created_at, m.id`,
-        [record.id],
+        `SELECT m.id, m.body, m.created_at, m.edited_at, m.deleted_at,
+                CASE WHEN m.sender_id = $2 THEN m.delivered_at ELSE NULL END AS delivered_at,
+                CASE WHEN m.sender_id = $2 THEN m.read_at ELSE NULL END AS read_at,
+                sender.public_id AS sender_public_id,
+                sender.role AS sender_role,
+                CASE WHEN sender.account_type = 'anonymous' THEN sender.public_id
+                     ELSE COALESCE(sender_profile.display_name, sender.public_id)
+                END AS sender_display_name
+         FROM messages m
+         JOIN users sender ON sender.id = m.sender_id
+         LEFT JOIN user_profiles sender_profile ON sender_profile.user_id = sender.id
+         WHERE m.conversation_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM message_user_hides hidden
+             WHERE hidden.message_id = m.id AND hidden.user_id = $2
+           )
+         ORDER BY m.created_at, m.id`,
+        [record.id, req.user.id],
       )
       res.json({ messages: result.rows })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  app.post("/api/conversations/:publicId/receipts", requireAuth, async (req, res, next) => {
+    const input = validateBody(z.object({
+      messageIds: z.array(z.string().uuid()).min(1).max(100),
+      state: z.enum(["delivered", "read"]),
+    }), req, res)
+    if (!input) return
+    try {
+      const conversation = await pool.query(
+        "SELECT * FROM counseling_conversations WHERE public_id = upper($1)",
+        [req.params.publicId],
+      )
+      const record = conversation.rows[0]
+      if (!record || !canAccessConversation(req.user, record)) {
+        return res.status(404).json({ error: "The requested record was not found." })
+      }
+      const receiptUpdate = input.state === "read"
+        ? `SET delivered_at = COALESCE(delivered_at, now()),
+               read_at = COALESCE(read_at, now())`
+        : "SET delivered_at = COALESCE(delivered_at, now())"
+      const result = await pool.query(
+        `UPDATE messages
+         ${receiptUpdate}
+         WHERE conversation_id = $1 AND id = ANY($2::uuid[]) AND sender_id <> $3
+         RETURNING id`,
+        [record.id, input.messageIds, req.user.id],
+      )
+      res.json({ updated: result.rowCount })
     } catch (error) {
       next(error)
     }
@@ -1843,12 +2112,22 @@ export function createApp({
         if (conversation.status !== "open") return { closed: true }
         const message = await client.query(
           `INSERT INTO messages (conversation_id, sender_id, body)
-           VALUES ($1, $2, $3) RETURNING created_at`,
+           VALUES ($1, $2, $3) RETURNING id, body, created_at`,
           [conversation.id, req.user.id, input.body],
         )
         await client.query(
           "UPDATE counseling_conversations SET updated_at = now() WHERE id = $1",
           [conversation.id],
+        )
+        const recipientId =
+          conversation.seeker_id === req.user.id
+            ? conversation.counselor_id
+            : conversation.seeker_id
+        await client.query(
+          `INSERT INTO user_notifications (user_id, kind, title, message)
+           VALUES ($1, 'conversation_message', 'New counseling message',
+                   'You have a new message in a counseling conversation.')`,
+          [recipientId],
         )
         await appendAudit(client, req.user.id, "conversation.message_created", "conversation", conversation.id)
         return { message: message.rows[0] }
@@ -1859,6 +2138,89 @@ export function createApp({
     } catch (error) {
       next(error)
     }
+  })
+
+  app.patch("/api/messages/:id", requireAuth, async (req, res, next) => {
+        if (!z.string().uuid().safeParse(req.params.id).success) {
+          return res.status(400).json({ error: "The message ID is invalid." })
+        }
+        const input = validateBody(z.object({ body: z.string().trim().min(1).max(4000) }), req, res)
+        if (!input) return
+        try {
+          const result = await inTransaction(pool, async (client) => {
+            const lookup = await client.query(
+              `SELECT m.id, m.sender_id, m.body, m.deleted_at,
+                      c.id AS conversation_id, c.seeker_id, c.counselor_id
+               FROM messages m
+               JOIN counseling_conversations c ON c.id = m.conversation_id
+               WHERE m.id = $1 FOR UPDATE OF m`,
+              [req.params.id],
+            )
+            const message = lookup.rows[0]
+            if (!message || !canAccessConversation(req.user, message)) return { missing: true }
+            if (message.sender_id !== req.user.id) return { forbidden: true }
+            if (message.deleted_at) return { deleted: true }
+            const updated = await client.query(
+              `UPDATE messages SET body = $2, edited_at = now()
+               WHERE id = $1 RETURNING id, body, created_at, edited_at`,
+              [message.id, input.body],
+            )
+            await appendAudit(client, req.user.id, "conversation.message_edited", "message", message.id)
+            return { message: updated.rows[0] }
+          })
+          if (result.missing) return res.status(404).json({ error: "The requested record was not found." })
+          if (result.forbidden) return res.status(403).json({ error: "You can edit only your own messages." })
+          if (result.deleted) return res.status(409).json({ error: "This message has been deleted." })
+          res.json(result)
+        } catch (error) {
+          next(error)
+        }
+  })
+
+  app.delete("/api/messages/:id", requireAuth, async (req, res, next) => {
+        if (!z.string().uuid().safeParse(req.params.id).success) {
+          return res.status(400).json({ error: "The message ID is invalid." })
+        }
+        const input = validateBody(z.object({ scope: z.enum(["for_me", "for_everyone"]) }), req, res)
+        if (!input) return
+        try {
+          const result = await inTransaction(pool, async (client) => {
+            const lookup = await client.query(
+              `SELECT m.id, m.sender_id, m.deleted_at,
+                      c.id AS conversation_id, c.seeker_id, c.counselor_id
+               FROM messages m
+               JOIN counseling_conversations c ON c.id = m.conversation_id
+               WHERE m.id = $1 FOR UPDATE OF m`,
+              [req.params.id],
+            )
+            const message = lookup.rows[0]
+            if (!message || !canAccessConversation(req.user, message)) return { missing: true }
+            if (input.scope === "for_everyone") {
+              if (message.sender_id !== req.user.id) return { forbidden: true }
+              if (!message.deleted_at) {
+                await client.query(
+                  `UPDATE messages SET body = 'This message was deleted', deleted_at = now()
+                   WHERE id = $1`,
+                  [message.id],
+                )
+                await appendAudit(client, req.user.id, "conversation.message_deleted_for_everyone", "message", message.id)
+              }
+            } else {
+              await client.query(
+                `INSERT INTO message_user_hides (message_id, user_id)
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+                [message.id, req.user.id],
+              )
+              await appendAudit(client, req.user.id, "conversation.message_hidden", "message", message.id)
+            }
+            return { deleted: true }
+          })
+          if (result.missing) return res.status(404).json({ error: "The requested record was not found." })
+          if (result.forbidden) return res.status(403).json({ error: "You can delete for everyone only your own messages." })
+          res.json(result)
+        } catch (error) {
+          next(error)
+        }
   })
 
   app.get("/api/journey", requireAuth, requireSeeker, async (req, res, next) => {
@@ -2700,9 +3062,12 @@ export function createApp({
     if (res.headersSent) return
     if (error instanceof multer.MulterError) {
       const tooLarge = error.code === "LIMIT_FILE_SIZE"
+      const profilePicture = error.field === "profilePicture" || error.field === "picture"
       return res.status(tooLarge ? 413 : 400).json({
         error: tooLarge
-          ? "Each upload must be 10 MB or smaller."
+          ? profilePicture
+            ? "Profile pictures must be 5 MB or smaller."
+            : "Each upload must be 10 MB or smaller."
           : "Check the uploaded files and try again.",
       })
     }
