@@ -45,7 +45,12 @@ const router = createRouter({
     { path: "/:pathMatch(.*)*", name: "not-found", component: App },
   ],
 
-  scrollBehavior: () => ({ top: 0 }),
+  scrollBehavior: () => ({
+    top: 0,
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? "auto"
+      : "smooth",
+  }),
 })
 
 export default router

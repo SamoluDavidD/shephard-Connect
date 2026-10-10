@@ -142,6 +142,25 @@ Conversation updates use authenticated polling while the chat is open (every fiv
 
 Migrations in `server/migrations/` apply in filename order. Migration `002_counselor_applications.sql` extends account types and adds applications, qualification verification, private-document metadata, review history, notifications, and applicant responses. Migration `003_site_settings.sql` adds a singleton setting for the public homepage image and its accessible description; migration `004_optional_counselor_information.sql` makes nonessential counselor-profile and professional details nullable and removes the license-authority dependency while preserving existing records and uploaded documents. Migration `006_user_notification_kinds.sql` enables notification events for counseling requests and messages; migration `007_user_profile_bio.sql` adds the optional short bio to user profiles; migration `008_user_profile_pictures.sql` adds nullable storage-key and MIME metadata for profile pictures without changing existing accounts. Migration `009_message_controls_and_receipts.sql` adds message edit/deletion/receipt timestamps and participant-specific message hiding without removing existing messages. Migration `010_user_anonymization_marker.sql` adds an account-anonymization timestamp without modifying existing user records. Migration `011_demographics_and_counselor_categories.sql` adds nullable private demographics, stable support categories, normalized approved counselor-specialty links (backfilled only for existing specialties that match configured category labels/aliases), and an optional category reference on counseling requests. Migration `012_gender_options_male_female.sql` restricts newly stored gender values to `male` or `female` (or null). Profile pictures use opaque names in the private document directory, accept signature-validated JPEG, PNG, and WebP images up to 5 MB, and are served to account owners, to assigned conversation counterparts when the account is registered, or publicly for active approved counselors only. Anonymous users' pictures are never exposed to conversation partners. Homepage image bytes are stored in PostgreSQL, so they persist across API restarts. Homepage image uploads are restricted to SuperAdmins and validated by file signature and a 5 MB size limit. The homepage image is publicly readable and versioned for cache invalidation. No migration constraint requires supporting-document records.
 
+Migration `013_lock_down_supabase_data_api.sql` enables RLS on all existing `public` tables, revokes table and sequence privileges from the Supabase `anon` and `authenticated` roles, and removes their default privileges for future tables and sequences. It intentionally creates no client policies: the current application accesses data only through its Express API. Direct Supabase client access remains disabled until a reviewed Supabase Auth/RLS implementation is in place.
+
+Migration `014_lock_down_supabase_rpc.sql` revokes public-schema function execution from those client roles and removes their default function-execution privileges for future functions. Migration `015_lock_down_public_function_defaults.sql` revokes `PUBLIC` execution on existing public-schema functions; migration `016_revoke_global_public_function_default.sql` removes PostgreSQL's global default `PUBLIC` function-execution grant for future functions.
+
+The Supabase-managed migration is in progress; the Vue application still uses the Express `/api` service for its active workflows. Do not point the frontend at the new Edge Function or deploy it as a replacement API yet. The `api` function currently implements health, active support-category, counselor directory/matching, authenticated account/profile reads and profile updates, owner-scoped notifications, role-scoped request/conversation lists, request creation/status changes, participant-scoped message reads/sends, and delivery/read receipts. Workflow writes are performed by service-role-only transactional database functions in migrations `018` and `020`; migration `019` configures their safe extension search path. These workflows and execution grants were transaction-tested against the configured hosted database, with test records rolled back. Profile and counselor picture URLs are intentionally returned as null until private Supabase Storage and its authorization rules are implemented. Registration, sign-in, edit/delete/hide messaging, administrative workflows, legacy account migration, remaining API routes, and live Edge Function/Auth end-to-end tests are not complete.
+
+Edge Function static checks and the isolated routing/CORS tests can be run with Deno:
+
+```bash
+deno check --node-modules-dir=auto supabase/functions/api/index.ts
+deno test --node-modules-dir=auto --allow-env --allow-net --allow-read supabase/functions/api/index_test.ts
+```
+
+The Edge Function tests cover health, origin rejection/preflight, missing authentication on all protected route families, and unknown routes. They do not verify live Edge Function credentials, PostgREST query relationships, Supabase Auth integration, or end-to-end browser workflows.
+
+Migration `017_supabase_auth_identity_link.sql` adds an optional unique `users.auth_user_id` link and its foreign key to Supabase Auth. It has been applied to the configured hosted database and the column, foreign key, and unique index were verified. Existing Express password hashes and sessions are not automatically transferred to Supabase Auth; preserve legacy accounts and define a verified account-linking/migration process before enabling Supabase sign-in.
+
+Deploy the Edge Function only after setting `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` as server-side Supabase function secrets and `APP_ORIGINS` to the exact permitted browser origins. The service-role key is privileged and must never use a `VITE_` variable, enter the browser bundle, or be configured as a Vercel client environment variable. Keep Express as the active API until all required Edge Function routes and frontend authentication changes are implemented and verified.
+
 Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names; original names and storage paths are never exposed as public URLs. Production deployments should use a private persistent volume with encryption at rest, restricted service access, backups, and a tested retention/deletion policy. The authenticated API streams file contents only to the applicant or a SuperAdmin reviewer.
 
 ## Security and privacy notes
@@ -160,18 +179,14 @@ Uploaded files are stored under `PRIVATE_DOCUMENT_DIR` using random opaque names
 
 ## Verification completed
 
-- `pnpm build` completes the Vue TypeScript check and production Vite build.
-- `pnpm test` passes: 33 tests across 2 test files, including participant-scoped conversation-history access, anonymous-safe sender labels, private demographic creation/updates, category-based counselor matching and administration, category-preserving requests, and profile-picture registration/upload/replacement/removal, validation, visibility, and access control.
-- All eight PostgreSQL migrations were applied successfully to the configured Supabase PostgreSQL 17.11 database. A repeat migration run completed without reapplying them.
-- Live schema verification confirmed 20 public tables and all eight migration ledger entries.
-- The Express `/health` route and public counselor API succeeded against the live database; unauthenticated `/api/me` returned 401 as expected.
-- The bootstrap SuperAdmin authenticated through the live API, received the expected SuperAdmin role, and successfully logged out; the revoked session then returned 401.
-- Admin settings now support persistent homepage image upload/removal with accessible alt text, and account settings support display-name and password updates.
-- A live browser/API check uploaded the supplied logo as a temporary homepage image, confirmed that the public homepage displayed the image with its alt text, and removed it afterward; the original homepage artwork is restored.
-- Server tests cover SuperAdmin-only homepage image management, image signature validation, public image delivery, and password updates with other-session revocation.
-- The database contained no pre-existing application users or counselor applications at migration time.
-- A live Supabase-backed API workflow passed 67 assertions across signup, account recovery, journey progress, safeguarding reports, counselor application review and separate credential verification, role-based access, counseling requests, conversations, messaging, suspension, session revocation, reactivation, and fresh login. The optional-information migration was applied and the nullable profile columns / removed license-authority constraint were verified.
-- Temporary workflow accounts and related application/request content were scrubbed or deactivated after testing. Append-only audit events are intentionally retained; do not disable the audit immutability trigger or delete those records.
+- `npm run typecheck` passed.
+- `npm run build` passed the Vue typecheck and Vite production build.
+- `npm test` passed: 35 tests across 2 test files. The API tests use an in-memory fake pool; they do not establish live Supabase Auth, Storage, or end-to-end workflow coverage.
+- The configured database was confirmed as Supabase PostgreSQL 17.11. All 20 app migrations are recorded as applied; migration 017's identity column, foreign key, and unique index were verified. Transaction tests exercised request creation, request acceptance/conversation creation, message sending, idempotent read receipts, unauthorized receipt rejection, and service-role-only RPC grants; all fixture data was rolled back.
+- Read-only schema checks found 23 public tables. Migration 013 was applied; all 23 now have RLS enabled, and checks confirmed that `anon` and `authenticated` cannot read or delete application rows.
+- The Express `/health` route returned HTTP 200 after the access lockdown. The Vite frontend returned HTTP 200 and remains available locally.
+- `.env` is not tracked by Git, and `.env.example` is present. The current example documents the Express/PostgreSQL setup, not a Vercel/Supabase Auth deployment.
+- No live Supabase Auth/Storage workflow, private-bucket access policy, Vercel deployment, or authenticated browser workflow was verified in this audit.
 
 External penetration testing, accessibility audit, legal review, safeguarding operational exercises, backup restoration, retention/deletion tests, and cross-browser device testing have not been completed.
 
@@ -180,6 +195,13 @@ External penetration testing, accessibility audit, legal review, safeguarding op
 This build is **not approved for public production use or real sensitive counseling data**. Production release depends on:
 
 - Decisions in [`docs/GCML_APPROVALS.md`](docs/GCML_APPROVALS.md)
+- Supabase Auth is not integrated into the application; accounts and sessions currently use custom Express-managed credentials and cookies. Supabase Auth users, password recovery, and app-role mapping must be designed and tested before the requested Supabase-first deployment.
+- Counselor documents and profile pictures use local filesystem storage. Configure Supabase Storage with private buckets, authorization policies, migration of existing files, and tested retention before deploying to Vercel/serverless infrastructure.
+- The Vite app calls the Express `/api` service. No Vercel API deployment or rewrite configuration exists; configure a supported API host or migrate the API workflows to Supabase Edge Functions before production deployment.
+- RLS is enabled on current public tables but has no user-facing policies by design. Do not grant Supabase client roles table access until least-privilege policies are implemented and tested.
+- The configured API database role is `postgres` and has `BYPASSRLS`; production must use a dedicated least-privilege service role and verify its exact grants.
+- SRS workflows remain incomplete or partial: prayer requests/team handling, administrator resource publishing/retirement, user data export/deletion requests, per-engagement identity-sharing consent, administrator need-area management, pending-request expiry, and full safeguarding case assignment/status handling. Add requirements traceability and tested acceptance evidence before release.
+- Add target-environment Supabase/Vercel variables and a matching deployment example only after the backend migration and API endpoint are selected.
 - Production-grade private document storage and retention controls
 - Provisioned SuperAdmin and safeguarding roles
 - PostgreSQL access policy, backups, retention, and deletion procedures

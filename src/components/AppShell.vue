@@ -217,22 +217,24 @@ async function signOut() {
           <NotificationMenu />
         </div>
       </header>
-      <div :key="route.path" class="app-content">
-        <Notice v-if="account.error" title="Account connection issue" tone="warning">
-          {{ account.error }}
-        </Notice>
-        <div v-if="pageAccess === 'checking'" class="empty-state" role="status">
-          <span><Icon name="ShieldCheck" :size="26" /></span><h2>Checking your account</h2><p>Your private dashboard will load when the account session is verified.</p>
+      <Transition name="page" mode="out-in">
+        <div :key="route.path" class="app-content">
+          <Notice v-if="account.error" title="Account connection issue" tone="warning">
+            {{ account.error }}
+          </Notice>
+          <div v-if="pageAccess === 'checking'" class="empty-state" role="status">
+            <span><Icon name="ShieldCheck" :size="26" /></span><h2>Checking your account</h2><p>Your private dashboard will load when the account session is verified.</p>
+          </div>
+          <Notice v-else-if="pageAccess === 'sign-in'" title="Sign in to continue">
+            This page requires an active ShepherdConnect account.
+            <RouterLink to="/sign-in">Sign in securely</RouterLink>
+          </Notice>
+          <Notice v-else-if="pageAccess === 'denied'" title="This page is not available">
+            Your current account role does not have access to this workspace.
+          </Notice>
+          <slot v-else />
         </div>
-        <Notice v-else-if="pageAccess === 'sign-in'" title="Sign in to continue">
-          This page requires an active ShepherdConnect account.
-          <RouterLink to="/sign-in">Sign in securely</RouterLink>
-        </Notice>
-        <Notice v-else-if="pageAccess === 'denied'" title="This page is not available">
-          Your current account role does not have access to this workspace.
-        </Notice>
-        <slot v-else />
-      </div>
+      </Transition>
     </main>
     <nav class="mobile-nav" aria-label="Mobile navigation">
       <RouterLink

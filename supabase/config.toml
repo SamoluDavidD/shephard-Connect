@@ -4,6 +4,10 @@
 # working directory name when running `supabase init`.
 project_id = "Build_ShepherdConnect_Application"
 
+[functions.api]
+# This function validates user access tokens itself; public routes also support anonymous callers.
+verify_jwt = false
+
 [api]
 enabled = true
 # Port to use for the API URL.

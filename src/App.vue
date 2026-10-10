@@ -2392,7 +2392,7 @@ function leaveConversation() {
   <main v-else-if="route.name === 'sign-in'" class="auth-page">
     <RouterLink to="/" class="auth-brand"><Brand /></RouterLink>
     <div class="auth-layout">
-      <section class="auth-message"><Badge tone="success"><Icon name="ShieldCheck" :size="14" /> Secure account access</Badge><h1>Your journey can continue here.</h1><p>Return to conversations, saved guidance, and your discipleship path from one private place.</p><div class="auth-quote"><Icon name="BookOpen" :size="22" /><blockquote>“I am the good shepherd. I know my own and my own know me.”</blockquote><cite>John 10:14</cite></div></section>
+      <section class="auth-message"><Badge tone="success"><Icon name="ShieldCheck" :size="14" /> Secure account access</Badge><h1>Your journey can continue here.</h1><p>Return to conversations, saved guidance, and your discipleship path from one private place.</p><div class="auth-quote"><blockquote>“I am the good shepherd. I know my own and my own know me.”</blockquote><cite>John 10:14</cite></div></section>
       <section v-if="!recoveryCode" class="auth-card">
         <Field v-if="authMode !== 'recover'" label="Account type">
           <select v-model="accountType" class="control">
